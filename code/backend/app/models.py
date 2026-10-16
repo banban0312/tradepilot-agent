@@ -383,8 +383,29 @@ class ContractLineBalance(TimestampMixin, Base):
     )
 
 
+class MCPToolEffect(Base):
+    """副作用工具的幂等账本；结果引用与业务写入同事务提交。"""
+
+    __tablename__ = "tool_effects"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_tool_effects_task", ondelete="RESTRICT"
+        ),
+        Index("ix_tool_effects_task_created", "task_id", "created_at"),
+    )
+
+    operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    args_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    result_ref: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Draft(TimestampMixin, Base):
-    """草稿头基础表；任务关联与不可变版本由后续业务 issue 接入。"""
+    """草稿头；M2 将每个任务唯一绑定到其可编辑草稿。"""
 
     __tablename__ = "drafts"
     __table_args__ = (
@@ -393,9 +414,14 @@ class Draft(TimestampMixin, Base):
             "lock_state IN ('EDITABLE', 'SUBMITTING', 'SUBMITTED')",
             name="ck_drafts_lock_state",
         ),
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_drafts_task", ondelete="RESTRICT"
+        ),
+        UniqueConstraint("task_id", name="uq_drafts_task"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     current_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     lock_state: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="EDITABLE"

@@ -7,12 +7,13 @@ import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import Tool as MCPTool
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import (
@@ -23,6 +24,8 @@ from app.auth.context import (
 )
 from app.config import settings
 from app.database import async_session_factory
+from app.drafts.service import DraftConflictError, save_candidate
+from app.drafts.types import CandidateOrder, FieldEvidenceInput
 from app.mcp_server.context import (
     CONTEXT_HEADER,
     MCP_TOOL_ALLOWLIST,
@@ -40,10 +43,11 @@ from app.mcp_server.contracts import (
     MCPErrorPayload,
     QueryCustomerInput,
     QueryCustomerOutput,
+    SavedDraftData,
     SaveOrderDraftInput,
     SaveOrderDraftOutput,
     StrictModel,
-    ToolNotImplemented,
+    ToolIssue,
     validate_raw_input,
 )
 from app.mcp_server.queries import (
@@ -53,8 +57,22 @@ from app.mcp_server.queries import (
     match_materials,
     query_customers,
 )
-from app.models import AgentTask, Department, User, UserDepartmentScope, UserRole
-from app.observability.service import finish_span, input_hash, start_span
+from app.models import (
+    AgentTask,
+    Department,
+    Draft,
+    MCPToolEffect,
+    User,
+    UserDepartmentScope,
+    UserRole,
+)
+from app.observability.service import (
+    append_task_event,
+    finish_span,
+    input_hash,
+    record_audit_event,
+    start_span,
+)
 
 TOOL_NAMES = MCP_TOOL_ALLOWLIST
 INPUT_MODELS = {
@@ -145,11 +163,21 @@ def _verified_context(ctx: Context[Any, Any], tool_name: str) -> ToolContextClai
 
 
 async def _reauthorize(
-    session: AsyncSession, claims: ToolContextClaims, tool_name: str
+    session: AsyncSession,
+    claims: ToolContextClaims,
+    tool_name: str,
+    *,
+    lock_task: bool = False,
 ) -> AuthContext:
     user = await session.get(User, claims.actor_id)
     department = await session.get(Department, claims.department_id)
-    task = await session.get(AgentTask, claims.task_id)
+    task = (
+        await session.scalar(
+            select(AgentTask).where(AgentTask.id == claims.task_id).with_for_update()
+        )
+        if lock_task
+        else await session.get(AgentTask, claims.task_id)
+    )
     if user is None or not user.active or department is None or not department.active:
         raise _error("ACCESS_DENIED", "当前用户或部门不可用")
     if (
@@ -193,89 +221,6 @@ async def _reauthorize(
     if tool_name == "save_order_draft" and BUSINESS_OPERATOR not in roles:
         raise _error("ACCESS_DENIED", "当前身份没有草稿经办权限")
     return actor
-
-
-async def _trace_unimplemented(
-    session_factory: Any,
-    *,
-    actor: AuthContext,
-    claims: ToolContextClaims,
-    tool_name: str,
-    request_id: str,
-    arguments: dict[str, Any],
-) -> None:
-    """持久记录真实 MCP 输入摘要和明确的未实现结果，不保留原始敏感内容。"""
-    started_at = time.monotonic_ns()
-    async with session_factory() as session:
-        span = await start_span(
-            session,
-            name=tool_name,
-            kind="tool",
-            execution_mode="live",
-            task_id=claims.task_id,
-            actor=actor,
-            trace_id=claims.trace_id,
-            protocol="MCP/Streamable HTTP",
-            input_ref={
-                "input_hash": input_hash(arguments),
-                "operation_id": claims.operation_id,
-                "tool_call_id": claims.tool_call_id,
-                "mcp_request_id": request_id,
-            },
-        )
-        span_id = span.id
-        await session.commit()
-    async with session_factory() as session:
-        await finish_span(
-            session,
-            span_id=span_id,
-            status="ERROR",
-            duration_ms=max(0, (time.monotonic_ns() - started_at) // 1_000_000),
-            output_ref={"code": ToolNotImplemented.code},
-            error={"code": ToolNotImplemented.code},
-        )
-        await session.commit()
-
-
-async def _not_implemented(
-    model: type[StrictModel],
-    tool_name: str,
-    ctx: Context[Any, Any],
-) -> None:
-    try:
-        raw = _raw_arguments(ctx)
-        value = validate_raw_input(model, raw)
-    except Exception as exc:
-        if isinstance(exc, ToolError):
-            raise
-        raise _error("TOOL_INPUT_INVALID", "工具输入不符合严格 Schema") from exc
-    assert isinstance(value, StrictModel)
-
-    claims = _verified_context(ctx, tool_name)
-    if isinstance(value, SaveOrderDraftInput) and value.task_id != claims.task_id:
-        raise _error("ACCESS_DENIED", "请求任务与可信任务上下文不一致")
-    async with async_session_factory() as session:
-        try:
-            actor = await _reauthorize(session, claims, tool_name)
-        except ToolError:
-            raise
-        except Exception as exc:
-            raise _error(
-                "MCP_AUTHORIZATION_UNAVAILABLE",
-                "无法重新验证 MCP 调用权限",
-                retryable=True,
-            ) from exc
-
-    arguments = value.model_dump(mode="json")
-    await _trace_unimplemented(
-        async_session_factory,
-        actor=actor,
-        claims=claims,
-        tool_name=tool_name,
-        request_id=ctx.request_id,
-        arguments=arguments,
-    )
-    raise _error("TOOL_NOT_IMPLEMENTED", "工具契约已注册，业务能力将在后续 issue 交付")
 
 
 async def _execute_read(
@@ -454,6 +399,187 @@ async def check_contract_balance(
     )  # type: ignore[return-value]
 
 
+async def _execute_save_draft(ctx: Context[Any, Any]) -> SaveOrderDraftOutput:
+    """在一次事务内保存版本、效果账本、审计及成功轨迹。"""
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    try:
+        value = validate_raw_input(SaveOrderDraftInput, _raw_arguments(ctx))
+    except Exception as exc:
+        if isinstance(exc, ToolError):
+            raise
+        raise _error("TOOL_INPUT_INVALID", "工具输入不符合严格 Schema") from exc
+    assert isinstance(value, SaveOrderDraftInput)
+
+    claims = _verified_context(ctx, "save_order_draft")
+    if value.task_id != claims.task_id:
+        raise _error("ACCESS_DENIED", "请求任务与可信任务上下文不一致")
+
+    arguments = value.model_dump(mode="json", exclude_none=True)
+    args_hash = input_hash(arguments)
+    # advisory transaction lock also serializes an accidentally reused operation ID
+    # across different tasks; a stored result can never be returned across task scope.
+    op_key = claims.operation_id.bytes
+    lock_a = int.from_bytes(op_key[:4], "big", signed=True)
+    lock_b = int.from_bytes(op_key[4:8], "big", signed=True)
+
+    try:
+        async with async_session_factory() as session, session.begin():
+            actor = await _reauthorize(
+                session, claims, "save_order_draft", lock_task=True
+            )
+            await session.execute(select(func.pg_advisory_xact_lock(lock_a, lock_b)))
+            effect = await session.get(MCPToolEffect, claims.operation_id)
+            if effect is not None:
+                if (
+                    effect.task_id != claims.task_id
+                    or effect.tool_name != "save_order_draft"
+                    or effect.args_hash != args_hash
+                ):
+                    raise _error(
+                        "IDEMPOTENCY_CONFLICT",
+                        "同一逻辑操作 ID 已用于不同任务、工具或参数",
+                    )
+                output = SaveOrderDraftOutput.model_validate_json(
+                    json.dumps(effect.result_ref, ensure_ascii=False, allow_nan=False),
+                    strict=True,
+                )
+            else:
+                draft = await session.scalar(
+                    select(Draft)
+                    .where(Draft.task_id == claims.task_id)
+                    .with_for_update()
+                )
+                if draft is None:
+                    draft = Draft(id=uuid4(), task_id=claims.task_id)
+                    session.add(draft)
+                    await session.flush()
+
+                try:
+                    candidate = CandidateOrder.model_validate(
+                        value.candidate_order.model_dump(mode="python")
+                    )
+                    evidence_refs = tuple(
+                        FieldEvidenceInput.model_validate(
+                            item.model_dump(mode="python")
+                        )
+                        for item in value.evidence_refs
+                    )
+                    candidate = candidate.model_copy(
+                        update={"evidence": (*candidate.evidence, *evidence_refs)}
+                    )
+                    saved = await save_candidate(
+                        session,
+                        draft_id=draft.id,
+                        expected_version=value.expected_version,
+                        candidate=candidate,
+                        actor=actor,
+                    )
+                except DraftConflictError as exc:
+                    raise _error(exc.code, str(exc)) from exc
+                except ValueError as exc:
+                    raise _error(
+                        "TOOL_INPUT_INVALID", "草稿字段不符合业务类型约束"
+                    ) from exc
+
+                data = SavedDraftData(
+                    draft_id=saved.draft_id,
+                    version=saved.version,
+                    content_hash=saved.content_hash,
+                    is_validated=saved.is_validated,
+                    total_amount=(
+                        format(saved.total_amount, ".2f")
+                        if saved.total_amount is not None
+                        else None
+                    ),
+                    issues=tuple(
+                        ToolIssue(
+                            code=issue.code,
+                            field=issue.field,
+                            message=issue.message,
+                        )
+                        for issue in saved.issues
+                    ),
+                )
+                output = SaveOrderDraftOutput(data=data, observed_at=datetime.now(UTC))
+                session.add(
+                    MCPToolEffect(
+                        operation_id=claims.operation_id,
+                        task_id=claims.task_id,
+                        tool_name="save_order_draft",
+                        args_hash=args_hash,
+                        result_ref=output.model_dump(mode="json"),
+                    )
+                )
+                await record_audit_event(
+                    session,
+                    action="MCP草稿保存",
+                    result="SUCCEEDED",
+                    actor=actor,
+                    task_id=claims.task_id,
+                    object_ref={"draft_id": saved.draft_id},
+                    after_ref={
+                        "version": saved.version,
+                        "content_hash": saved.content_hash,
+                        "is_validated": saved.is_validated,
+                        "operation_id": claims.operation_id,
+                    },
+                    input_value=arguments,
+                )
+
+            span = await start_span(
+                session,
+                name="save_order_draft",
+                kind="tool",
+                execution_mode="live",
+                task_id=claims.task_id,
+                actor=actor,
+                trace_id=claims.trace_id,
+                protocol="MCP/Streamable HTTP",
+                started_at=started_at,
+                input_ref={
+                    "input_hash": args_hash,
+                    "operation_id": claims.operation_id,
+                    "tool_call_id": claims.tool_call_id,
+                    "mcp_request_id": ctx.request_id,
+                },
+            )
+            await finish_span(
+                session,
+                span_id=span.id,
+                status="OK",
+                duration_ms=max(0, (time.monotonic_ns() - started_ns) // 1_000_000),
+                output_ref={
+                    "output_hash": input_hash(output.model_dump(mode="json")),
+                    "draft_id": output.data.draft_id,
+                    "version": output.data.version,
+                    "operation_id": claims.operation_id,
+                },
+            )
+            if effect is None:
+                await append_task_event(
+                    session,
+                    task_id=claims.task_id,
+                    event_type="draft.saved",
+                    span_id=span.id,
+                    payload={
+                        "draft_id": output.data.draft_id,
+                        "version": output.data.version,
+                        "content_hash": output.data.content_hash,
+                        "is_validated": output.data.is_validated,
+                    },
+                )
+            return output
+    except ToolError:
+        raise
+    except Exception as exc:
+        raise _error(
+            "MCP_DRAFT_SAVE_UNAVAILABLE",
+            "草稿保存事务失败，结果未确认",
+            retryable=True,
+        ) from exc
+
+
 async def save_order_draft(
     task_id: Any = None,
     expected_version: Any = None,
@@ -462,8 +588,7 @@ async def save_order_draft(
     ctx: Context[Any, Any] = None,
 ) -> SaveOrderDraftOutput:
     """保存当前可信任务的草稿候选；不能批准或创建正式订单。"""
-    await _not_implemented(SaveOrderDraftInput, "save_order_draft", ctx)
-    raise AssertionError("不可达")
+    return await _execute_save_draft(ctx)
 
 
 @mcp_server.tool()
