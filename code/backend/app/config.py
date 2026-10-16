@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     session_ttl_hours: int = Field(default=12, gt=0, le=720)
     session_cookie_secure: bool = True
     app_origin: str | None = None
+    trace_retention_days: int = Field(default=30, ge=1, le=3650)
 
     @property
     def model_configuration_state(self) -> str:
