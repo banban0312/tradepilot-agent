@@ -118,7 +118,10 @@ class TaskSession(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_sessions_owner_updated", "owner_id", "updated_at"),
         ForeignKeyConstraint(["owner_id"], ["users.id"], name="fk_sessions_owner", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["last_task_id"], ["agent_tasks.id"], name="fk_sessions_last_task", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["last_task_id"], ["agent_tasks.id"], name="fk_sessions_last_task",
+            ondelete="RESTRICT", use_alter=True,
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
