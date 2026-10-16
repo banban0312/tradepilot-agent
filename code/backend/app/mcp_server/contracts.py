@@ -34,6 +34,24 @@ PositiveMoneyString = Annotated[
         pattern=r"^(0\.(?:0[1-9]|[1-9][0-9])|[1-9][0-9]{0,17}\.[0-9]{2})$",
     ),
 ]
+DecimalValueString = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=1,
+        max_length=24,
+        pattern=r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,6})?$",
+    ),
+]
+SignedMoneyString = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=4,
+        max_length=22,
+        pattern=r"^-?(0|[1-9][0-9]{0,17})\.[0-9]{2}$",
+    ),
+]
 ShortText = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)]
 MAX_TOOL_ARGUMENT_BYTES = 262_144
 
@@ -61,10 +79,25 @@ class MatchMaterialInput(StrictModel):
     specification: str | None = Field(default=None, max_length=256)
     unit: str | None = Field(default=None, max_length=32)
 
+    @field_validator("raw_name")
+    @classmethod
+    def require_nonblank_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("raw_name 不能为空")
+        return value
+
 
 class GetContractInput(StrictModel):
     contract_number: ShortText
     order_type: Literal["SALES", "PURCHASE"]
+
+    @field_validator("contract_number")
+    @classmethod
+    def trim_contract_number(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("contract_number 不能为空")
+        return value
 
 
 class CheckContractBalanceInput(StrictModel):
@@ -221,20 +254,37 @@ class MaterialMatchData(StrictModel):
     candidates: tuple[MaterialCandidate, ...]
 
 
+class ContractLineData(StrictModel):
+    material_id: UUID
+    material_code: str
+    material_name: str
+    specification: str
+    unit: str
+    unit_price: DecimalValueString | None
+    max_quantity: DecimalValueString | None
+
+
 class ContractData(StrictModel):
     id: UUID
     contract_number: str
     order_type: Literal["SALES", "PURCHASE"]
     customer_id: UUID
+    customer_name: str
     project_id: UUID
+    project_name: str
+    delivery_address: str | None
+    currency: str
     total: MoneyString
-    status: str
+    status: Literal["ACTIVE", "INACTIVE"]
+    valid_from: date
+    valid_to: date
+    lines: tuple[ContractLineData, ...]
 
 
 class ContractBalanceData(StrictModel):
     total: MoneyString
     occupied: MoneyString
-    remaining: MoneyString
+    remaining: SignedMoneyString
     order_amount: MoneyString
     allowed: bool
     checked_at: datetime

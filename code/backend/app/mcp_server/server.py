@@ -1,9 +1,11 @@
-"""严格 MCP 服务；业务处理器在对应数据 issue 完成前明确拒绝执行。"""
+"""严格 MCP 服务；主数据查询实际读取授权范围内的业务记录。"""
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -43,6 +45,13 @@ from app.mcp_server.contracts import (
     StrictModel,
     ToolNotImplemented,
     validate_raw_input,
+)
+from app.mcp_server.queries import (
+    MCPReadError,
+    check_balance,
+    get_contract_details,
+    match_materials,
+    query_customers,
 )
 from app.models import AgentTask, Department, User, UserDepartmentScope, UserRole
 from app.observability.service import finish_span, input_hash, start_span
@@ -269,6 +278,118 @@ async def _not_implemented(
     raise _error("TOOL_NOT_IMPLEMENTED", "工具契约已注册，业务能力将在后续 issue 交付")
 
 
+async def _execute_read(
+    model: type[StrictModel],
+    output_model: type[StrictModel],
+    tool_name: str,
+    ctx: Context[Any, Any],
+    query,
+) -> StrictModel:
+    """验证原始 MCP 参数和可信身份后执行只读查询，并记录摘要轨迹。"""
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    try:
+        value = validate_raw_input(model, _raw_arguments(ctx))
+    except Exception as exc:
+        if isinstance(exc, ToolError):
+            raise
+        raise _error("TOOL_INPUT_INVALID", "工具输入不符合严格 Schema") from exc
+
+    claims = _verified_context(ctx, tool_name)
+    async with async_session_factory() as session:
+        try:
+            actor = await _reauthorize(session, claims, tool_name)
+            task = await session.get(AgentTask, claims.task_id)
+            if task is None:
+                raise _error("ACCESS_DENIED", "任务不属于当前身份或部门")
+            if tool_name == "query_customer":
+                result = await query(session, value, department_id=claims.department_id)
+            elif tool_name == "match_material":
+                result = await query(session, value)
+            elif tool_name == "get_contract":
+                result = await query(
+                    session,
+                    value,
+                    department_id=claims.department_id,
+                    task_type=task.task_type,
+                )
+            elif tool_name == "check_contract_balance":
+                result = await query(
+                    session,
+                    value,
+                    department_id=claims.department_id,
+                    task_type=task.task_type,
+                    actor_id=actor.user_id,
+                )
+            else:
+                result = await query(
+                    session,
+                    value,
+                    department_id=claims.department_id,
+                    task_type=task.task_type,
+                )
+            result = output_model.model_validate_json(
+                json.dumps(
+                    result.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+                strict=True,
+            )
+        except (ToolError, MCPReadError) as exc:
+            if isinstance(exc, ToolError):
+                raise
+            raise _error(exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise _error(
+                "MCP_QUERY_UNAVAILABLE",
+                "无法读取当前业务主数据",
+                retryable=True,
+            ) from exc
+
+    arguments = value.model_dump(mode="json")
+    result_data = result.model_dump(mode="json")
+    span_id = None
+    try:
+        async with async_session_factory() as session:
+            span = await start_span(
+                session,
+                name=tool_name,
+                kind="tool",
+                execution_mode="live",
+                task_id=claims.task_id,
+                actor=actor,
+                trace_id=claims.trace_id,
+                protocol="MCP/Streamable HTTP",
+                started_at=started_at,
+                input_ref={
+                    "input_hash": input_hash(arguments),
+                    "operation_id": claims.operation_id,
+                    "tool_call_id": claims.tool_call_id,
+                    "mcp_request_id": ctx.request_id,
+                },
+            )
+            span_id = span.id
+            await session.commit()
+        async with async_session_factory() as session:
+            await finish_span(
+                session,
+                span_id=span_id,
+                status="OK",
+                duration_ms=max(0, (time.monotonic_ns() - started_ns) // 1_000_000),
+                output_ref={
+                    "output_hash": input_hash(result_data),
+                    "source_refs": list(result_data.get("source_refs", ())),
+                },
+            )
+            await session.commit()
+    except Exception as exc:
+        raise _error(
+            "MCP_TRACE_UNAVAILABLE", "查询结果轨迹未能安全保存", retryable=True
+        ) from exc
+    return result
+
+
 async def query_customer(
     name: Any = None,
     code: Any = None,
@@ -276,8 +397,13 @@ async def query_customer(
     ctx: Context[Any, Any] = None,
 ) -> QueryCustomerOutput:
     """按当前任务部门查询客户候选；本工具仅支持只读查询。"""
-    await _not_implemented(QueryCustomerInput, "query_customer", ctx)
-    raise AssertionError("不可达")
+    return await _execute_read(
+        QueryCustomerInput,
+        QueryCustomerOutput,
+        "query_customer",
+        ctx,
+        query_customers,
+    )  # type: ignore[return-value]
 
 
 async def match_material(
@@ -287,8 +413,13 @@ async def match_material(
     ctx: Context[Any, Any] = None,
 ) -> MatchMaterialOutput:
     """按名称、规格和单位匹配标准物料；候选确认由业务流程处理。"""
-    await _not_implemented(MatchMaterialInput, "match_material", ctx)
-    raise AssertionError("不可达")
+    return await _execute_read(
+        MatchMaterialInput,
+        MatchMaterialOutput,
+        "match_material",
+        ctx,
+        match_materials,
+    )  # type: ignore[return-value]
 
 
 async def get_contract(
@@ -297,8 +428,13 @@ async def get_contract(
     ctx: Context[Any, Any] = None,
 ) -> GetContractOutput:
     """查询当前任务部门内合同信息；不创建订单或占用额度。"""
-    await _not_implemented(GetContractInput, "get_contract", ctx)
-    raise AssertionError("不可达")
+    return await _execute_read(
+        GetContractInput,
+        GetContractOutput,
+        "get_contract",
+        ctx,
+        get_contract_details,
+    )  # type: ignore[return-value]
 
 
 async def check_contract_balance(
@@ -309,8 +445,13 @@ async def check_contract_balance(
     ctx: Context[Any, Any] = None,
 ) -> CheckContractBalanceOutput:
     """核验合同额度的只读契约；提交时仍需服务端重新核验。"""
-    await _not_implemented(CheckContractBalanceInput, "check_contract_balance", ctx)
-    raise AssertionError("不可达")
+    return await _execute_read(
+        CheckContractBalanceInput,
+        CheckContractBalanceOutput,
+        "check_contract_balance",
+        ctx,
+        check_balance,
+    )  # type: ignore[return-value]
 
 
 async def save_order_draft(

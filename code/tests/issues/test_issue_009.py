@@ -365,11 +365,12 @@ async def test_real_streamable_http_context_reauthorization_and_trace() -> None:
             task.state = "RUNNING"
             await session.commit()
 
-        with pytest.raises(MCPCallError) as not_implemented:
-            await client.call_tool(
-                "query_customer", {"name": "隔离客户"}, context_token=token
-            )
-        assert not_implemented.value.payload.code == "TOOL_NOT_IMPLEMENTED"
+        # M2-03 已交付客户查询；本隔离部门没有该客户，必须如实返回空候选。
+        no_customer = await client.call_tool(
+            "query_customer", {"name": "隔离客户"}, context_token=token
+        )
+        assert no_customer.data.candidates == ()
+        assert [issue.code for issue in no_customer.issues] == ["CUSTOMER_NOT_FOUND"]
 
         async with async_session_factory() as session:
             task = await session.get(AgentTask, task_id)
@@ -395,8 +396,8 @@ async def test_real_streamable_http_context_reauthorization_and_trace() -> None:
                 ).all()
             )
             assert len(spans) == 1
-            assert spans[0].status == "ERROR"
-            assert spans[0].error == {"code": "TOOL_NOT_IMPLEMENTED"}
+            assert spans[0].status == "OK"
+            assert spans[0].error is None
             assert spans[0].input_ref["tool_call_id"] == "model-call-001"
             assert spans[0].input_ref["operation_id"]
             assert spans[0].input_ref["mcp_request_id"]

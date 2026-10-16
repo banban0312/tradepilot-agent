@@ -1,8 +1,9 @@
 """从本地环境文件或进程环境读取配置，不输出密钥值。"""
 
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +19,9 @@ class Settings(BaseSettings):
     database_url: SecretStr
     checkpoint_schema: str = Field(
         default="tradepilot_checkpoints", pattern=r"^[a-z_][a-z0-9_]{0,62}$"
+    )
+    business_timezone: str = Field(
+        default="Asia/Hong_Kong", min_length=1, max_length=64
     )
     attachments_root: Path = Path("/var/lib/tradepilot/attachments")
     mcp_url: str = "http://127.0.0.1:8001/mcp"
@@ -35,6 +39,15 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = True
     app_origin: str | None = None
     trace_retention_days: int = Field(default=30, ge=1, le=3650)
+
+    @field_validator("business_timezone")
+    @classmethod
+    def validate_business_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("BUSINESS_TIMEZONE 必须是有效的 IANA 时区名称") from exc
+        return value
 
     @property
     def model_configuration_state(self) -> str:
