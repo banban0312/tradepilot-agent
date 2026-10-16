@@ -295,6 +295,8 @@ class SavedDraftData(StrictModel):
     draft_id: UUID
     version: int = Field(ge=1)
     content_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    is_validated: bool
+    total_amount: MoneyString | None
     issues: tuple[ToolIssue, ...] = ()
 
 
@@ -322,12 +324,6 @@ class MCPUnavailable(RuntimeError):
     """MCP 传输不可用；调用方不得将其转换成业务成功。"""
 
     code = "MCP_UNAVAILABLE"
-
-
-class ToolNotImplemented(RuntimeError):
-    """契约已注册，但对应业务 issue 尚未交付。"""
-
-    code = "TOOL_NOT_IMPLEMENTED"
 
 
 def validate_raw_input(model: type[StrictModel], raw: object) -> StrictModel:
