@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     CHAR,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -398,6 +399,126 @@ class FieldEvidence(Base):
     accepted_value: Mapped[object | None] = mapped_column(JSONB)
     confirmed_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
 
+
+class TraceSpan(Base):
+    """一次模型、工具、规则、等待或业务动作的真实执行区间。"""
+
+    __tablename__ = "trace_spans"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["parent_span_id"],
+            ["trace_spans.id"],
+            name="fk_trace_spans_parent",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["actor_id"], ["users.id"], name="fk_trace_spans_actor", ondelete="RESTRICT"
+        ),
+        CheckConstraint("attempt > 0", name="ck_trace_spans_attempt_positive"),
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms >= 0",
+            name="ck_trace_spans_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "status IN ('RUNNING', 'OK', 'ERROR', 'INTERRUPTED')",
+            name="ck_trace_spans_status",
+        ),
+        Index("ix_trace_spans_task_start", "task_id", "start_at"),
+        Index("ix_trace_spans_status_start", "status", "start_at"),
+        Index("ix_trace_spans_trace", "trace_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    trace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    # agent_tasks 在 M2-01 才建立；后续迁移补正式 FK，当前保留稳定的任务标识。
+    task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    parent_span_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    actor_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    protocol: Mapped[str | None] = mapped_column(String(64))
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="RUNNING"
+    )
+    input_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    output_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    usage: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    error: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+
+class TaskEventCursor(Base):
+    """按任务锁定的下一个事件序号；与事件同事务递增。"""
+
+    __tablename__ = "task_event_cursors"
+    __table_args__ = (
+        CheckConstraint("next_seq > 0", name="ck_task_event_cursors_next_seq_positive"),
+    )
+
+    # agent_tasks 由后续任务队列 issue 建立，之后会补充外键。
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    next_seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="1"
+    )
+
+
+class TaskEvent(Base):
+    """供 SSE/回查使用的按任务单调事件记录。"""
+
+    __tablename__ = "task_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["span_id"],
+            ["trace_spans.id"],
+            name="fk_task_events_span",
+            ondelete="SET NULL",
+        ),
+        Index("ix_task_events_emitted_at", "emitted_at"),
+    )
+
+    # agent_tasks 由后续任务队列 issue 建立，之后会补充外键。
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    span_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    emitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AuditEvent(Base):
+    """与业务操作同事务写入的追加式责任流水。"""
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["actor_id"],
+            ["users.id"],
+            name="fk_audit_events_actor",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_audit_events_task_created", "task_id", "created_at"),
+        Index("ix_audit_events_actor_created", "actor_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    # task_id 在任务表交付后补 FK；审计表保留独立长留存期。
+    task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    actor_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    object_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    before_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    after_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    input_hash: Mapped[str | None] = mapped_column(CHAR(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 class Order(TimestampMixin, Base):
     """正式订单基础头表；任务、批准和明细关系按对应 issue 增量添加。"""

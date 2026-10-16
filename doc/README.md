@@ -14,6 +14,7 @@
 | [登录会话与授权基线](./development/AUTH-BASELINE.md) | Cookie 会话、CSRF、角色与部门范围 |
 | [草稿领域与版本基线](./development/DRAFT-BASELINE.md) | 候选/有效草稿、Decimal 金额、来源证据与乐观锁 |
 | [合同与字段规则预检基线](./development/CONTRACT-RULES-BASELINE.md) | 合同关联、规则校验、额度预览与只读边界 |
+| [可观测性持久化基础](./development/OBSERVABILITY-BASELINE.md) | Trace/Span、顺序事件、脱敏审计与运行轨迹留存边界 |
 | [可编辑原型](./design/ui.pen) | 使用 VS Code 的 Pen 扩展打开 |
 | [原型 PDF](./design/exports/TradePilot-Prototype-v0.1.pdf) | 总览、设计规范与 25 个画板，共 27 页 |
 | [原型清单](./design/manifest.json) | 画板编号、节点 ID 与图片路径 |
