@@ -52,6 +52,16 @@ uv run --project code/backend --locked pytest code/tests/issues/test_issue_001.p
 
 最后一行的集成测试会要求隔离 Compose 网络中的服务地址和 `TRADEPILOT_TEST_MODE=1`，一般情况请使用下方专用验证脚本。
 
+## Issue #8 持久任务队列与恢复验证
+
+```powershell
+pwsh -File code/scripts/verify_issue_008.ps1
+```
+
+该脚本需 Docker Desktop Linux 容器引擎可用，并使用随机 Compose 项目、端口和 PostgreSQL 数据卷。脚本迁移到最新版本、运行 `alembic check`、初始化隔离示例账号，然后运行 #6 轨迹回归和 #8 PostgreSQL 集成测试。验证命令重放、采销任务隔离、同任务 advisory lock、旧 epoch 对任务状态及 LangGraph checkpoint 的写入 fencing，以及 Worker 进程释放连接后的原 job/task 恢复。进程心跳过期但锁仍被持有的场景必须保持不接管。
+
+验证包含持久数据库与 LangGraph 官方 PostgreSQL checkpointer 的真实集成，不需要模型凭据；该 issue 不接入在线模型或业务 MCP。随机 Compose 清理仅作用于本次项目。若 Docker 不可用，静态检查结果不能替代数据库集成结果。
+
 ## Issue #1 完整验证
 
 ```powershell
