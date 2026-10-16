@@ -112,6 +112,10 @@ async def test_sales_purchase_tasks_are_distinct_and_commands_are_durable_and_id
 async def test_worker_lock_recovery_keeps_task_id_and_fences_stale_worker_and_checkpointer() -> None:
     task_id, queued = await _create_task_job()
     async with async_session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE jobs SET available_at=now() + interval '1 day' WHERE state='READY' AND id != :job_id"),
+            {"job_id": queued.job_id},
+        )
         job = await try_claim_job(
             session, worker_id="worker-old", supported_kinds=frozenset({"RUN_TASK"})
         )
@@ -140,8 +144,17 @@ async def test_worker_lock_recovery_keeps_task_id_and_fences_stale_worker_and_ch
     builder.add_node("advance", advance)
     builder.add_edge(START, "advance")
     builder.add_edge("advance", END)
-    saver = EpochFencedPostgresSaver(lease_one)
+    checkpoint_schema = f"tp_issue008_{uuid4().hex}"
+    saver = EpochFencedPostgresSaver(
+        lease_one, checkpoint_schema=checkpoint_schema
+    )
     await saver.setup()
+    async with first_connection.begin():
+        checkpoint_table = await first_connection.scalar(
+            text("SELECT to_regclass(:table_name)"),
+            {"table_name": f"{checkpoint_schema}.checkpoints"},
+        )
+        assert checkpoint_table is not None
     graph = builder.compile(checkpointer=saver)
     graph_config = {"configurable": {"thread_id": str(task_id)}}
     result = await graph.ainvoke({"count": 0}, graph_config)
@@ -162,8 +175,9 @@ async def test_worker_lock_recovery_keeps_task_id_and_fences_stale_worker_and_ch
             second_connection, stale_before=datetime.now(UTC) - timedelta(minutes=1)
         ) == 0
 
-    # 模拟 Worker 进程崩溃导致 PostgreSQL 专属连接断开；服务器释放 session 锁。
-    await first_connection.invalidate()
+    # 模拟旧执行器失去任务锁但仍留存数据库连接；恢复器提升 epoch 后，
+    # 旧执行器的 checkpoint 写入仍须在事务内被拒绝。
+    await lease_one.release()
     async with second_connection.begin():
         assert await recover_abandoned_jobs(
             second_connection, stale_before=datetime.now(UTC) - timedelta(minutes=1)
@@ -215,3 +229,53 @@ async def test_worker_lock_recovery_keeps_task_id_and_fences_stale_worker_and_ch
     await lease_two.release()
     await first_connection.close()
     await second_connection.close()
+
+
+@pytest.mark.asyncio
+async def test_abandoned_connection_recovery_reclaims_same_job_and_advances_epoch() -> None:
+    task_id, queued = await _create_task_job()
+    async with async_session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE jobs SET available_at=now() + interval '1 day' WHERE state='READY' AND id != :job_id"),
+            {"job_id": queued.job_id},
+        )
+        claimed = await try_claim_job(
+            session, worker_id="worker-crashed", supported_kinds=frozenset({"RUN_TASK"})
+        )
+        assert claimed is not None and claimed.id == queued.job_id
+
+    crashed_connection = await engine.connect()
+    coordinator_connection = await engine.connect()
+    crashed_lease = await TaskExecutionLease.acquire(
+        crashed_connection, task_id=task_id, job_id=queued.job_id,
+        worker_id="worker-crashed",
+    )
+    assert crashed_lease.epoch == 1
+    async with coordinator_connection.begin():
+        await coordinator_connection.execute(
+            text("UPDATE jobs SET heartbeat_at=:old WHERE id=:job_id"),
+            {"old": datetime.now(UTC) - timedelta(hours=1), "job_id": queued.job_id},
+        )
+
+    # invalidate 模拟 PostgreSQL session 消失，服务端随之释放 advisory lock。
+    await crashed_connection.invalidate()
+    async with coordinator_connection.begin():
+        assert await recover_abandoned_jobs(
+            coordinator_connection, stale_before=datetime.now(UTC) - timedelta(minutes=1)
+        ) == 1
+    async with async_session_factory() as session, session.begin():
+        reclaimed = await try_claim_job(
+            session, worker_id="worker-recovered", supported_kinds=frozenset({"RUN_TASK"})
+        )
+        assert reclaimed is not None
+        assert reclaimed.id == queued.job_id
+        assert reclaimed.task_id == task_id
+
+    recovered_lease = await TaskExecutionLease.acquire(
+        coordinator_connection, task_id=task_id, job_id=queued.job_id,
+        worker_id="worker-recovered",
+    )
+    assert recovered_lease.epoch == 3
+    await recovered_lease.release()
+    await crashed_connection.close()
+    await coordinator_connection.close()

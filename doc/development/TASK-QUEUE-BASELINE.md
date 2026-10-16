@@ -13,7 +13,7 @@
 
 - Worker 以专属 PostgreSQL 连接获取 `pg_try_advisory_lock(hashtextextended(task_id, 0))`，持有到图调用结束。连接不可回到普通连接池复用。
 - 获取任务锁后，在事务中递增 `agent_tasks.execution_epoch` 并写入作业。每次状态投影/业务副作用必须在同一事务中先 `SELECT ... FOR UPDATE` 校验 epoch；旧执行者不能在检查和写入之间被接管。
-- `EpochFencedPostgresSaver` 绑定任务 ID、epoch 和专属连接。检查点及中间 writes 的同一个写事务先锁定任务行核对 epoch，避免“先查 epoch，再由另一连接写 checkpoint”的竞争窗口。业务 ORM 写入使用 `lease.write_session()`，它将任务行锁与业务写入放在同一连接的外层事务中；官方 LangGraph 负责管理 checkpoint 表结构。
+- `EpochFencedPostgresSaver` 绑定任务 ID、epoch 和专属 psycopg 连接，并把官方 checkpointer 表放入独立 `checkpoint_schema`（默认 `tradepilot_checkpoints`）。初始化阶段使用独立的 schema 级 advisory lock 串行运行官方迁移；检查点及中间 writes 的同一个写事务先锁定 `public.agent_tasks` 核对 epoch，避免“先查 epoch，再由另一连接写 checkpoint”的竞争窗口。业务 ORM 写入使用 `lease.write_session()`，它将任务行锁与业务写入放在同一连接的外层事务中。
 - 恢复器将过期心跳仅视为候选。只有成功获取任务 session advisory lock 才能递增 execution_epoch 并将原 job 重新排为 READY；恢复接管事务先使旧 epoch 失效。心跳过期本身不撤销仍持锁 Worker 的写权限。
 - Worker 初始最多 5 个全局活跃任务；领取事务使用全局短事务锁串行化容量判断，单个任务仍由 advisory lock 串行。没有注册图执行器的作业不会被领取或显示成功；真实图/工具执行由后续 issue 接入。
 
