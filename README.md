@@ -36,6 +36,10 @@ tradepilot-agent/
 
 从 [PRD](./doc/PRD.md)、[技术 Spec](./doc/SPEC.md) 和 [原型说明](./doc/design/README.md) 开始阅读。后续前端、后端、MCP、测试、评测与部署实现统一放入 `code/`；需求、设计和原型资料统一放入 `doc/`。
 
+## 本地工程基线
+
+工程启动、依赖锁定、环境变量准备与验证步骤见[本地开发说明](./doc/development/LOCAL-ENVIRONMENT.md)。后端使用 `uv` 管理 Python 3.12 及锁文件，前端使用 Node.js 22；本地演示服务由隔离命名的 Docker Compose 项目启动。
+
 ## ✨ 核心特性 | Key Features
 
 ### 🤖 Agentic Workflow — 智能业务工作流

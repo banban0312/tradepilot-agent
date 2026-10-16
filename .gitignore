@@ -221,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TradePilot front-end
+code/frontend/node_modules/
+code/frontend/dist/
