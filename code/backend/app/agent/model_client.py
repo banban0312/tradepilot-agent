@@ -108,7 +108,11 @@ class OpenAIResponsesClient:
                         f"{self.base_url}/responses", headers=headers, json=body
                     )
                 if response.status_code >= 400:
-                    retryable = (
+                    quota_exhausted = (
+                        response.status_code == 429
+                        and _has_quota_exhaustion_code(response)
+                    )
+                    retryable = not quota_exhausted and (
                         response.status_code in {408, 409, 425, 429}
                         or response.status_code >= 500
                     )
@@ -116,7 +120,9 @@ class OpenAIResponsesClient:
                         await asyncio.sleep(_backoff(attempt))
                         continue
                     code = (
-                        "MODEL_RATE_LIMITED"
+                        "MODEL_QUOTA_EXHAUSTED"
+                        if quota_exhausted
+                        else "MODEL_RATE_LIMITED"
                         if response.status_code == 429
                         else "MODEL_PROVIDER_REJECTED"
                         if 400 <= response.status_code < 500
@@ -153,6 +159,25 @@ class OpenAIResponsesClient:
                     "MODEL_TRANSPORT_ERROR", retryable=False, attempts=attempt
                 ) from exc
         raise ModelProviderError("MODEL_UNAVAILABLE", retryable=True, attempts=attempts)
+
+
+def _has_quota_exhaustion_code(response: httpx.Response) -> bool:
+    """只检查供应商稳定错误码，不读取或记录可能含敏感信息的错误消息。"""
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    codes = {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "billing_hard_limit_reached",
+    }
+    return any(error.get(field) in codes for field in ("type", "code"))
 
 
 def _backoff(attempt: int) -> float:

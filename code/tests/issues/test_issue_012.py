@@ -588,6 +588,44 @@ async def test_responses_client_retries_rate_limit_and_preserves_usage() -> None
 
 
 @pytest.mark.asyncio
+async def test_responses_client_does_not_retry_exhausted_model_quota() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "type": "insufficient_quota",
+                    "code": "credit_balance_exhausted",
+                    "message": "private provider detail",
+                }
+            },
+        )
+
+    client = OpenAIResponsesClient(
+        model="configured-model",
+        api_key=SecretStr("not-a-real-key"),
+        max_retries=2,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ModelProviderError) as error:
+        await client.create_response(
+            instructions="测试额度错误分类",
+            input_items=[{"role": "user", "content": "测试"}],
+            tools=[],
+        )
+
+    assert error.value.code == "MODEL_QUOTA_EXHAUSTED"
+    assert error.value.retryable is False
+    assert error.value.attempts == 1
+    assert len(requests) == 1
+    assert "private provider detail" not in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_incomplete_model_response_fails_without_a_success_payload() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
