@@ -1,0 +1,167 @@
+{
+  "name": "TradePilot Prototype",
+  "version": "0.1",
+  "date": "2026-10-16",
+  "source": "ui.pen",
+  "overview": {
+    "nodeId": "I1tJjc",
+    "preview": "exports/00-overview.png"
+  },
+  "designSystem": {
+    "nodeId": "pZOK9",
+    "preview": "exports/00-design-system.png"
+  },
+  "pdf": "exports/TradePilot-Prototype-v0.1.pdf",
+  "screens": [
+    {
+      "id": "R47Wt",
+      "number": "01",
+      "name": "01 · 智能提单 / 待人工批准",
+      "preview": "exports/01-workbench.png"
+    },
+    {
+      "id": "MrBrJ",
+      "number": "02",
+      "name": "02 · 缺字段 / 原任务恢复",
+      "preview": "exports/02-missing-fields.png"
+    },
+    {
+      "id": "bZlOC",
+      "number": "03",
+      "name": "03 · OCR 识别 / 超额阻断",
+      "preview": "exports/03-ocr-quota-block.png"
+    },
+    {
+      "id": "i3lNYD",
+      "number": "04",
+      "name": "04 · 订单中心 / 悬浮窗",
+      "preview": "exports/04-order-center-widget.png"
+    },
+    {
+      "id": "GcYGW",
+      "number": "05",
+      "name": "05 · Excel 批量导入 / 异常定位",
+      "preview": "exports/05-batch-import.png"
+    },
+    {
+      "id": "u7XG0Q",
+      "number": "06",
+      "name": "06 · Agent 执行追踪 / MCP 输入输出",
+      "preview": "exports/06-agent-trace.png"
+    },
+    {
+      "id": "xy3eQ",
+      "number": "07",
+      "name": "07 · 评测中心 / 六类案例与失败报告",
+      "preview": "exports/07-evaluation.png"
+    },
+    {
+      "id": "qf6li",
+      "number": "08",
+      "name": "08 · 合同台账 / 主数据维护",
+      "preview": "exports/08-contract-ledger.png"
+    },
+    {
+      "id": "ydo7j",
+      "number": "09",
+      "name": "09 · 人工审批 / 版本绑定与正式提交",
+      "preview": "exports/09-human-approval.png"
+    },
+    {
+      "id": "Xidt3",
+      "number": "10",
+      "name": "10 · 身份登录 / 角色与部门范围",
+      "preview": "exports/10-sign-in.png"
+    },
+    {
+      "id": "Q7wF5g",
+      "number": "11",
+      "name": "11 · 历史任务 / 草稿载入与恢复",
+      "preview": "exports/11-task-history.png"
+    },
+    {
+      "id": "TAE6G",
+      "number": "12",
+      "name": "12 · PDF / 图片识别 / 字段证据确认",
+      "preview": "exports/12-document-evidence.png"
+    },
+    {
+      "id": "MaKuQ",
+      "number": "13",
+      "name": "13 · Excel 行内修正 / 重新校验",
+      "preview": "exports/13-batch-edit.png"
+    },
+    {
+      "id": "IZ7ob",
+      "number": "14",
+      "name": "14 · 正式订单详情 / 批准与审计回查",
+      "preview": "exports/14-order-detail.png"
+    },
+    {
+      "id": "kHHln",
+      "number": "15",
+      "name": "15 · 标准物料 / 别名与编码维护",
+      "preview": "exports/15-material-dictionary.png"
+    },
+    {
+      "id": "fD9gd",
+      "number": "16",
+      "name": "16 · 模型 / MCP / 规则 / 操作审计",
+      "preview": "exports/16-runtime-settings.png"
+    },
+    {
+      "id": "SHR9I",
+      "number": "17",
+      "name": "17 · 失败定位 / 提交核实与防重",
+      "preview": "exports/17-failure-recovery.png"
+    },
+    {
+      "id": "HcT0s",
+      "number": "18",
+      "name": "18 · 加载 / 空白 / 权限 / 错误状态",
+      "preview": "exports/18-interface-states.png"
+    },
+    {
+      "id": "Fh35H",
+      "number": "19",
+      "name": "19 · 人工决定 / 批准退回拒绝与失效",
+      "preview": "exports/19-approval-decisions.png"
+    },
+    {
+      "id": "UvTPk",
+      "number": "20",
+      "name": "20 · 批量批准 / 逐笔版本确认",
+      "preview": "exports/20-batch-approval.png"
+    },
+    {
+      "id": "KirJT",
+      "number": "21",
+      "name": "21 · 批量提交结果 / 部分成功与实时额度变化",
+      "preview": "exports/21-batch-results.png"
+    },
+    {
+      "id": "e7s5A7",
+      "number": "22",
+      "name": "22 · 新建任务 / 快捷入口与使用帮助",
+      "preview": "exports/22-new-task-help.png"
+    },
+    {
+      "id": "ixoPO",
+      "number": "23",
+      "name": "23 · 操作审计 / 输入哈希与责任追溯",
+      "preview": "exports/23-audit-log.png"
+    },
+    {
+      "id": "icvoy",
+      "number": "24",
+      "name": "24 · 规则核验 / 并发额度与工具类型约束",
+      "preview": "exports/24-rule-validation.png"
+    },
+    {
+      "id": "UUyXR",
+      "number": "25",
+      "name": "25 · 草稿预览编辑 / 双向同步与重审",
+      "preview": "exports/25-draft-edit.png"
+    }
+  ]
+}

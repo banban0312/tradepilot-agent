@@ -14,6 +14,28 @@ TradePilot is an enterprise AI agent platform designed for intelligent trade ord
 
 ---
 
+## 项目目录与文档
+
+```text
+tradepilot-agent/
+├── code/                         # 项目实现代码、测试、评测脚本与运行配置
+├── doc/
+│   ├── README.md                 # 文档导航
+│   ├── PRD.md                    # 产品需求与验收标准
+│   ├── SPEC.md                   # 技术设计与实现任务
+│   └── design/
+│       ├── ui.pen                # VS Code Pen 可编辑原型
+│       ├── README.md             # 原型说明与页面索引
+│       ├── ACCEPTANCE-COVERAGE.md # 功能与验收覆盖表
+│       ├── manifest.json         # 画板节点与导出文件清单
+│       ├── exports/              # 正式 PNG 与 PDF 导出
+│       └── review/               # 绘制过程中的视觉审阅图片
+├── .gitignore
+└── README.md
+```
+
+从 [PRD](./doc/PRD.md)、[技术 Spec](./doc/SPEC.md) 和 [原型说明](./doc/design/README.md) 开始阅读。后续前端、后端、MCP、测试、评测与部署实现统一放入 `code/`；需求、设计和原型资料统一放入 `doc/`。
+
 ## ✨ 核心特性 | Key Features
 
 ### 🤖 Agentic Workflow — 智能业务工作流
@@ -274,34 +296,25 @@ TradePilot 计划从业务系统和 Agent 运行时两个层面保障执行安�
 
 ## 📁 项目目录 | Project Structure
 
-以下为规划中的目录结构：
+实现目录统一以 `code/` 为根，以下子目录在编码阶段逐步建立；`doc/` 中的需求、设计与原型资料已经形成。
 
 ```text
 tradepilot-agent/
-├── frontend/                 # Vue 3 前端
-│   └── src/
-│       ├── components/
-│       ├── views/
-│       ├── stores/
-│       └── services/
-│
-├── backend/                  # FastAPI 后端
-│   ├── app/
-│   │   ├── api/              # REST API
-│   │   ├── agents/           # LangGraph 工作流
-│   │   ├── tools/            # Agent 业务工具
-│   │   ├── services/         # 业务逻辑
-│   │   ├── models/           # 数据模型
-│   │   ├── schemas/          # Pydantic Schema
-│   │   ├── integrations/     # OCR 与模型适配
-│   │   └── core/             # 配置与安全
-│   └── tests/
-│
-├── data/                     # 示例业务数据
-├── evals/                    # Agent 评测集
-├── docs/                     # 设计与使用文档
-├── docker-compose.yml
-├── .env.example
+├── code/
+│   ├── frontend/             # Vue 3 前端
+│   │   └── src/              # 组件、页面、状态与接口
+│   ├── backend/              # FastAPI、LangGraph 与 MCP
+│   │   └── app/              # api、agent、tools、domain 等
+│   ├── tests/                # 单元、集成、恢复与安全验证
+│   ├── evals/                # Agent 评测集与运行脚本
+│   ├── data/                 # 示例业务数据
+│   ├── docker-compose.yml
+│   └── .env.example
+├── doc/
+│   ├── PRD.md
+│   ├── SPEC.md
+│   └── design/               # ui.pen、覆盖表与导出图片/PDF
+├── AGENTS.md                 # 协作与提交约定
 └── README.md
 ```
 
@@ -344,8 +357,8 @@ tradepilot-agent/
 项目基础工程完成后，将在此补充可直接执行的安装及启动步骤，包括：
 
 1. 克隆仓库并安装前后端依赖。
-2. 使用 `.env.example` 创建本地环境配置。
-3. 启动 PostgreSQL、Redis 及应用服务。
+2. 使用 `code/.env.example` 创建本地环境配置。
+3. 按技术 Spec 启动 PostgreSQL 与应用服务；Redis 为后续可选组件。
 4. 初始化示例业务数据。
 5. 启动前端并访问 TradePilot 工作台。
 6. 运行后端测试及 Agent 评测。
