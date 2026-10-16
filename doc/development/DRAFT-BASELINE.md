@@ -1,6 +1,6 @@
 # 草稿领域与版本基线
 
-Issue #4 提供订单候选、有效草稿、人民币金额计算、字段来源记录，以及可复用的草稿保存/载入服务。任务表和任务 API 由后续 issue 引入，因此当前服务以调用方生成的 `draft_id` 为入口；本阶段不伪造任务关联，也不提供审批或正式下单接口。
+Issue #4 提供订单候选、有效草稿、人民币金额计算、字段来源记录，以及可复用的草稿保存/载入服务。Issue #11 将任务与唯一草稿绑定，并由真实 MCP `save_order_draft` 调用此领域服务；本阶段不提供审批或正式下单接口。
 
 ## 类型和金额约定
 
@@ -16,9 +16,9 @@ Issue #4 提供订单候选、有效草稿、人民币金额计算、字段来�
 
 ## 版本和事务
 
-迁移新增 `draft_revisions`、`draft_items`、`field_evidence`。修订与明细按版本只追加，SHA-256 摘要由排序键规范化的业务 JSON 计算，不包含来源证据或界面/运行状态。保存先锁定草稿头并比对 `expected_version`；版本过期返回 `DRAFT_VERSION_CONFLICT`，锁定草稿拒绝修改。相同业务摘要返回现有版本，不重复插入。调用方必须在同一外层数据库事务内完成其他关联写入并负责 commit/rollback。
+迁移新增 `draft_revisions`、`draft_items`、`field_evidence`，Issue #11 增加 `drafts.task_id` 唯一关联和 `tool_effects` 操作结果账本。修订与明细按版本只追加，SHA-256 摘要由排序键规范化的业务 JSON 计算，不包含来源证据或界面/运行状态。保存先锁定草稿头并比对 `expected_version`；版本过期返回 `DRAFT_VERSION_CONFLICT`，锁定草稿拒绝修改。相同业务摘要返回现有版本，不重复插入。MCP 保存会在同一事务中提交草稿、操作参数哈希/原响应、审计及成功轨迹；相同 `operation_id` 与参数重放返回原响应，不递增版本，不同参数返回 `IDEMPOTENCY_CONFLICT`。
 
-`drafts.current_version = 0` 表示尚无修订；首个修订版本为 1。此表当前没有 `task_id` 外键，因为对应任务表尚未交付；后续任务 issue 负责增加关联并在集成边界补齐任务锁与访问范围。当前领域服务要求 `business_operator` 角色，不接受调用方提供 `changed_by`、`confirmed_by` 或批准身份。
+`drafts.current_version = 0` 表示尚无修订；首个修订版本为 1。`task_id` 在 M2-04 新增且允许为空，以兼容 M1-04 建立的既有草稿；MCP 新建的草稿必须绑定已重新授权的可信任务。任务行锁串行化同一任务的首写和版本更新，执行 epoch 失效、跨任务草稿引用和旧版本写入均不能产生业务副作用。当前领域服务要求 `business_operator` 角色，不接受调用方提供 `changed_by`、`confirmed_by` 或批准身份。
 
 ## 验证
 
@@ -31,4 +31,4 @@ pwsh -File code/scripts/verify_issue_004.ps1
 
 验证入口使用唯一 Compose 项目名和独立 PostgreSQL 卷，显式启用本地演示账号，仅用于隔离集成测试。脚本通过 `uv run --frozen` 运行迁移、检查和 pytest；退出时只清理本次生成的 Compose 项目与卷，并恢复调用 shell 的演示环境变量。需要 Docker Compose、项目依赖可用及本机数据库端口可绑定。此验证不调用在线模型或外部 ERP。
 
-测试覆盖 200×3500、180×3500、半分 ROUND_HALF_UP、精度/浮点拒绝、不完整候选、来源追溯、同内容幂等、版本变化、陈旧版本冲突和角色限制。迁移与测试使用本地隔离 PostgreSQL，结果不代表真实服务或在线模型验收。
+Issue #4 测试覆盖 200×3500、180×3500、半分 ROUND_HALF_UP、精度/浮点拒绝、不完整候选、来源追溯、同内容幂等、版本变化、陈旧版本冲突和角色限制。Issue #11 真实 MCP 集成覆盖任务绑定、逻辑操作重放、同操作不同内容冲突、草稿版本冲突、同任务并发写入、审计/轨迹关联及正式订单零写入。验证通过 `code/scripts/verify_issue_011.ps1` 使用隔离 PostgreSQL；在线模型评测不在本 issue 范围内。
