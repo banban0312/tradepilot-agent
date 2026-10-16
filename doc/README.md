@@ -12,6 +12,7 @@
 | [工程技术基线](./development/TECHNICAL-BASELINE.md) | 依赖锁定、MCP/PDF 授权选择与兼容验证证据 |
 | [数据库迁移与演示数据](./development/DATABASE-BASELINE.md) | Alembic 初始化、基础约束与可重复主数据 |
 | [登录会话与授权基线](./development/AUTH-BASELINE.md) | Cookie 会话、CSRF、角色与部门范围 |
+| [前端导航与通用界面状态基线](./development/FRONTEND-BASELINE.md) | 登录导航、会话保护、通用反馈与尚未接入功能边界 |
 | [草稿领域与版本基线](./development/DRAFT-BASELINE.md) | 候选/有效草稿、Decimal 金额、来源证据与乐观锁 |
 | [合同与字段规则预检基线](./development/CONTRACT-RULES-BASELINE.md) | 合同关联、规则校验、额度预览与只读边界 |
 | [可观测性持久化基础](./development/OBSERVABILITY-BASELINE.md) | Trace/Span、顺序事件、脱敏审计与运行轨迹留存边界 |
