@@ -23,6 +23,7 @@ from sqlalchemy import (
     Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -286,6 +287,116 @@ class Draft(TimestampMixin, Base):
     lock_state: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="EDITABLE"
     )
+
+
+class DraftRevision(Base):
+    """不可变的业务草稿快照；每次有效变更递增版本。"""
+
+    __tablename__ = "draft_revisions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["draft_id"], ["drafts.id"], name="fk_draft_revisions_draft", ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["changed_by"], ["users.id"], name="fk_draft_revisions_changed_by", ondelete="RESTRICT"
+        ),
+        CheckConstraint("version > 0", name="ck_draft_revisions_version_positive"),
+        CheckConstraint("currency = 'CNY'", name="ck_draft_revisions_currency_cny"),
+        CheckConstraint("total_amount IS NULL OR total_amount >= 0", name="ck_draft_revisions_total_nonnegative"),
+        CheckConstraint("order_type IS NULL OR order_type IN ('SALES', 'PURCHASE')", name="ck_draft_revisions_order_type"),
+        Index("ix_draft_revisions_changed_by", "changed_by"),
+    )
+
+    draft_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("contracts.id", ondelete="RESTRICT")
+    )
+    order_type: Mapped[str | None] = mapped_column(String(16))
+    customer_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("customers.id", ondelete="RESTRICT")
+    )
+    project_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="RESTRICT")
+    )
+    currency: Mapped[str] = mapped_column(CHAR(3), nullable=False, server_default="CNY")
+    delivery_date: Mapped[date | None] = mapped_column(Date)
+    address: Mapped[str | None] = mapped_column(Text)
+    contact: Mapped[str | None] = mapped_column(Text)
+    business_fields: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    total_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
+    content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    validation: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    changed_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DraftItem(Base):
+    """按草稿版本保存的不可变明细。"""
+
+    __tablename__ = "draft_items"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["draft_id", "version"],
+            ["draft_revisions.draft_id", "draft_revisions.version"],
+            name="fk_draft_items_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("quantity IS NULL OR quantity >= 0", name="ck_draft_items_quantity_nonnegative"),
+        CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_draft_items_unit_price_nonnegative"),
+        CheckConstraint("amount IS NULL OR amount >= 0", name="ck_draft_items_amount_nonnegative"),
+        CheckConstraint("line_no > 0", name="ck_draft_items_line_no_positive"),
+        Index("ix_draft_items_material_id", "material_id"),
+    )
+
+    draft_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    line_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("materials.id", ondelete="RESTRICT")
+    )
+    raw_name: Mapped[str | None] = mapped_column(Text)
+    specification: Mapped[str | None] = mapped_column(Text)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    unit: Mapped[str | None] = mapped_column(String(16))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
+
+
+class FieldEvidence(Base):
+    """字段来源快照；确认人只能由可信服务端身份写入。"""
+
+    __tablename__ = "field_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["draft_id", "version"],
+            ["draft_revisions.draft_id", "draft_revisions.version"],
+            name="fk_field_evidence_revision",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["confirmed_by"], ["users.id"], name="fk_field_evidence_confirmed_by", ondelete="RESTRICT"
+        ),
+        Index("ix_field_evidence_draft_version", "draft_id", "version"),
+        CheckConstraint(
+            "source_type IN ('USER_TEXT', 'FILE_PAGE', 'FILE_CELL', 'MASTER_DATA', 'USER_EDIT', 'SYSTEM_COMPUTED')",
+            name="ck_field_evidence_source_type",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    draft_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    field_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    artifact_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    message_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    locator: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    raw_value: Mapped[object | None] = mapped_column(JSONB)
+    accepted_value: Mapped[object | None] = mapped_column(JSONB)
+    confirmed_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
 
 
 class Order(TimestampMixin, Base):
