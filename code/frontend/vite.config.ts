@@ -12,7 +12,8 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: env.TRADEPILOT_API_PROXY_TARGET || 'http://127.0.0.1:8010',
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api/, ''),
+          rewrite: (path) =>
+            path.startsWith('/api/v1/') ? path : path.replace(/^\/api/, ''),
         },
       },
     },
