@@ -22,6 +22,8 @@ from app.auth.context import (
 )
 from app.auth.dependencies import SESSION_COOKIE, session_digest
 from app.auth.passwords import hash_password
+from app.auth.routes import demo_login_enabled
+from app.config import settings
 from app.database import async_session_factory
 from app.models import AuthSession, User
 
@@ -222,3 +224,14 @@ def test_default_seed_has_no_demo_users_and_enabled_seed_uses_reserved_accounts(
     assert "users" not in default_tables
     assert "users" in explicit_demo_tables
     assert {"user_roles", "user_department_scopes"} <= explicit_demo_tables
+
+
+def test_demo_accounts_cannot_login_after_demo_mode_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "demo_mode", False)
+    assert not demo_login_enabled("demo-operator-north")
+    assert demo_login_enabled("employee-100")
+
+    monkeypatch.setattr(settings, "demo_mode", True)
+    assert demo_login_enabled("demo-operator-north")

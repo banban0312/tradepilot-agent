@@ -37,6 +37,11 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+def demo_login_enabled(login_name: str) -> bool:
+    """演示账号即使仍保存在数据库，也只能在显式演示模式下登录。"""
+    return not login_name.startswith("demo-") or settings.demo_mode
+
+
 @router.post("/login")
 async def login(
     body: LoginRequest,
@@ -51,7 +56,12 @@ async def login(
     encoded = user.password_hash if user is not None else None
     password_matches = await run_in_threadpool(verify_password, body.password, encoded)
 
-    if user is None or not user.active or not password_matches:
+    if (
+        user is None
+        or not user.active
+        or not password_matches
+        or not demo_login_enabled(login_name)
+    ):
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_CREDENTIALS", "message": "账号或密码错误"},
