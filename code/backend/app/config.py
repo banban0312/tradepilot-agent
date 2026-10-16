@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     mcp_url: str = "http://127.0.0.1:8001/mcp"
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8000
+    mcp_context_signing_key: SecretStr | None = None
     model_provider: str | None = None
     model_name: str | None = None
     model_api_key: SecretStr | None = None
