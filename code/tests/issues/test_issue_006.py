@@ -7,14 +7,17 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
-from sqlalchemy import delete, select, update
-from sqlalchemy.exc import DBAPIError
-
 from app.auth.context import BUSINESS_OPERATOR, AuthContext
 from app.config import Settings, settings
 from app.database import async_session_factory
-from app.models import AuditEvent, TaskEvent, TaskEventCursor, TraceSpan
+from app.models import (
+    AgentTask,
+    AuditEvent,
+    TaskEvent,
+    TaskEventCursor,
+    TaskSession,
+    TraceSpan,
+)
 from app.observability.service import (
     append_task_event,
     finish_span,
@@ -25,6 +28,9 @@ from app.observability.service import (
     record_audit_event,
     start_span,
 )
+from pydantic import ValidationError
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import DBAPIError
 
 ACTOR = AuthContext(
     user_id=UUID("00000000-0000-4000-8000-000000000100"),
@@ -34,11 +40,26 @@ ACTOR = AuthContext(
 )
 
 
+async def _create_task_rows(session, task_ids: list[UUID]) -> None:
+    """M2 起轨迹引用真实任务；回归测试仍使用隔离的任务 UUID。"""
+    for task_id in task_ids:
+        nav = TaskSession(id=uuid4(), owner_id=ACTOR.user_id, title="轨迹回归")
+        session.add(nav)
+        await session.flush()
+        session.add(AgentTask(
+            id=task_id, session_id=nav.id, owner_id=ACTOR.user_id,
+            department_id=next(iter(ACTOR.department_ids)), task_type="SALES",
+        ))
+        await session.flush()
+        nav.last_task_id = task_id
+
+
 @pytest.mark.asyncio
 async def test_span_hierarchy_redaction_usage_and_audit_append_only() -> None:
     task_id = uuid4()
     started = datetime.now(UTC)
     async with async_session_factory() as session, session.begin():
+        await _create_task_rows(session, [task_id])
         parent = await start_span(
             session,
             task_id=task_id,
@@ -130,6 +151,8 @@ async def test_span_hierarchy_redaction_usage_and_audit_append_only() -> None:
 @pytest.mark.asyncio
 async def test_event_sequence_is_serialized_and_rollback_leaves_no_gap() -> None:
     task_id = uuid4()
+    async with async_session_factory() as session, session.begin():
+        await _create_task_rows(session, [task_id])
 
     async def write_event(index: int) -> int:
         async with async_session_factory() as session, session.begin():
@@ -178,6 +201,7 @@ async def test_stale_running_span_is_interrupted_without_invented_cause() -> Non
     started = datetime.now(UTC) - timedelta(hours=2)
     task_id = uuid4()
     async with async_session_factory() as session, session.begin():
+        await _create_task_rows(session, [task_id])
         span = await start_span(
             session,
             task_id=task_id,
@@ -203,6 +227,7 @@ async def test_stale_running_span_is_interrupted_without_invented_cause() -> Non
 
     direct_task_id = uuid4()
     async with async_session_factory() as session, session.begin():
+        await _create_task_rows(session, [direct_task_id])
         span = await start_span(
             session,
             task_id=direct_task_id,
@@ -240,6 +265,9 @@ async def test_retention_defaults_to_30_days_and_protects_live_ordered_and_audit
     audit_id = uuid4()
 
     async with async_session_factory() as session, session.begin():
+        await _create_task_rows(
+            session, [eligible_task, active_task, ordered_task, running_task]
+        )
         for task_id in (eligible_task, active_task, ordered_task, running_task):
             await append_task_event(
                 session,

@@ -111,6 +111,118 @@ class AuthSession(Base):
     )
 
 
+class TaskSession(TimestampMixin, Base):
+    """登录身份之上的任务导航容器；会话不承载唯一执行状态。"""
+
+    __tablename__ = "sessions"
+    __table_args__ = (
+        Index("ix_sessions_owner_updated", "owner_id", "updated_at"),
+        ForeignKeyConstraint(["owner_id"], ["users.id"], name="fk_sessions_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["last_task_id"], ["agent_tasks.id"], name="fk_sessions_last_task",
+            ondelete="RESTRICT", use_alter=True,
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    last_task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+
+
+class AgentTask(TimestampMixin, Base):
+    """任务是可恢复的业务执行身份，LangGraph thread_id 固定使用该 id。"""
+
+    __tablename__ = "agent_tasks"
+    __table_args__ = (
+        CheckConstraint("task_type IN ('SALES', 'PURCHASE')", name="ck_agent_tasks_type"),
+        CheckConstraint(
+            "state IN ('QUEUED', 'RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'BLOCKED_RULE', 'FAILED', 'COMPLETED', 'REJECTED')",
+            name="ck_agent_tasks_state",
+        ),
+        CheckConstraint("execution_epoch >= 0", name="ck_agent_tasks_epoch_nonnegative"),
+        CheckConstraint("projection_version >= 0", name="ck_agent_tasks_projection_nonnegative"),
+        Index("ix_agent_tasks_owner_created", "owner_id", "created_at"),
+        Index("ix_agent_tasks_department_state", "department_id", "state"),
+        ForeignKeyConstraint(["session_id"], ["sessions.id"], name="fk_agent_tasks_session", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["owner_id"], ["users.id"], name="fk_agent_tasks_owner", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["department_id"], ["departments.id"], name="fk_agent_tasks_department", ondelete="RESTRICT"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    session_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    owner_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    graph_version: Mapped[str] = mapped_column(String(64), nullable=False, server_default="v1")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, server_default="QUEUED")
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    projection_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    checkpoint_ref: Mapped[str | None] = mapped_column(Text)
+    current_step: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    config_snapshot_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+
+
+class TaskCommand(Base):
+    """持久化用户动作；request_id 重放返回原命令，不重复排队。"""
+
+    __tablename__ = "task_commands"
+    __table_args__ = (
+        UniqueConstraint("task_id", "request_id", name="uq_task_commands_request"),
+        CheckConstraint(
+            "state IN ('READY', 'APPLIED', 'REJECTED', 'SUPERSEDED')",
+            name="ck_task_commands_state",
+        ),
+        Index("ix_task_commands_task_created", "task_id", "created_at"),
+        ForeignKeyConstraint(["task_id"], ["agent_tasks.id"], name="fk_task_commands_task", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["actor_id"], ["users.id"], name="fk_task_commands_actor", ondelete="RESTRICT"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    actor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    expected_version: Mapped[int | None] = mapped_column(Integer)
+    target_interrupt_id: Mapped[str | None] = mapped_column(Text)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="READY")
+    result_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TaskJob(Base):
+    """可抢占的持久作业；租约超时只用于发现，advisory lock 才决定所有权。"""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        UniqueConstraint("command_id", "kind", name="uq_jobs_command_kind"),
+        CheckConstraint("state IN ('READY', 'RUNNING', 'DONE', 'FAILED')", name="ck_jobs_state"),
+        CheckConstraint("attempts >= 0", name="ck_jobs_attempts_nonnegative"),
+        Index("ix_jobs_state_available", "state", "available_at"),
+        Index("ix_jobs_task_state", "task_id", "state"),
+        ForeignKeyConstraint(["task_id"], ["agent_tasks.id"], name="fk_jobs_task", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["command_id"], ["task_commands.id"], name="fk_jobs_command", ondelete="RESTRICT"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="READY")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(128))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_epoch: Mapped[int | None] = mapped_column(BigInteger)
+
+
 class Customer(TimestampMixin, Base):
     __tablename__ = "customers"
     __table_args__ = (
@@ -414,6 +526,9 @@ class TraceSpan(Base):
         ForeignKeyConstraint(
             ["actor_id"], ["users.id"], name="fk_trace_spans_actor", ondelete="RESTRICT"
         ),
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_trace_spans_task", ondelete="RESTRICT"
+        ),
         CheckConstraint("attempt > 0", name="ck_trace_spans_attempt_positive"),
         CheckConstraint(
             "duration_ms IS NULL OR duration_ms >= 0",
@@ -430,7 +545,6 @@ class TraceSpan(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     trace_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    # agent_tasks 在 M2-01 才建立；后续迁移补正式 FK，当前保留稳定的任务标识。
     task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     parent_span_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     actor_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
@@ -457,9 +571,11 @@ class TaskEventCursor(Base):
     __tablename__ = "task_event_cursors"
     __table_args__ = (
         CheckConstraint("next_seq > 0", name="ck_task_event_cursors_next_seq_positive"),
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_task_event_cursors_task", ondelete="RESTRICT"
+        ),
     )
 
-    # agent_tasks 由后续任务队列 issue 建立，之后会补充外键。
     task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     next_seq: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="1"
@@ -476,6 +592,9 @@ class TaskEvent(Base):
             ["trace_spans.id"],
             name="fk_task_events_span",
             ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_task_events_task", ondelete="RESTRICT"
         ),
         Index("ix_task_events_emitted_at", "emitted_at"),
     )
@@ -502,12 +621,14 @@ class AuditEvent(Base):
             name="fk_audit_events_actor",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_audit_events_task", ondelete="RESTRICT"
+        ),
         Index("ix_audit_events_task_created", "task_id", "created_at"),
         Index("ix_audit_events_actor_created", "actor_id", "created_at"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    # task_id 在任务表交付后补 FK；审计表保留独立长留存期。
     task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     actor_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     action: Mapped[str] = mapped_column(Text, nullable=False)

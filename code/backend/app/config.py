@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     )
 
     database_url: SecretStr
+    checkpoint_schema: str = Field(
+        default="tradepilot_checkpoints", pattern=r"^[a-z_][a-z0-9_]{0,62}$"
+    )
     attachments_root: Path = Path("/var/lib/tradepilot/attachments")
     mcp_url: str = "http://127.0.0.1:8001/mcp"
     mcp_host: str = "0.0.0.0"
