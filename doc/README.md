@@ -10,6 +10,7 @@
 | [验收覆盖表](./design/ACCEPTANCE-COVERAGE.md) | 28 项 P0/P1 功能、27 条 AC 与画板逐项对应 |
 | [本地开发环境](./development/LOCAL-ENVIRONMENT.md) | uv、Node.js、Compose 启动及 issue 验证命令 |
 | [工程技术基线](./development/TECHNICAL-BASELINE.md) | 依赖锁定、MCP/PDF 授权选择与兼容验证证据 |
+| [数据库迁移与演示数据](./development/DATABASE-BASELINE.md) | Alembic 初始化、基础约束与可重复主数据 |
 | [可编辑原型](./design/ui.pen) | 使用 VS Code 的 Pen 扩展打开 |
 | [原型 PDF](./design/exports/TradePilot-Prototype-v0.1.pdf) | 总览、设计规范与 25 个画板，共 27 页 |
 | [原型清单](./design/manifest.json) | 画板编号、节点 ID 与图片路径 |
