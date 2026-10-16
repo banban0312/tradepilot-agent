@@ -130,6 +130,7 @@ services:
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
       APP_ORIGIN: ${APP_ORIGIN:-}
+      TRADEPILOT_ONLINE_MODEL: ${TRADEPILOT_ONLINE_MODEL:-0}
     depends_on:
       db:
         condition: service_healthy

@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     model_provider: str | None = None
     model_name: str | None = None
     model_api_key: SecretStr | None = None
+    model_base_url: str = "https://api.openai.com/v1"
+    model_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    model_max_retries: int = Field(default=2, ge=0, le=5)
+    model_max_rounds: int = Field(default=8, ge=1, le=50)
+    model_max_tool_calls: int = Field(default=20, ge=1, le=100)
     ocr_provider: str | None = None
     ocr_api_key: SecretStr | None = None
     demo_mode: bool = False
