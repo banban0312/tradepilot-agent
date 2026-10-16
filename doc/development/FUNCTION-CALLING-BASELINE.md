@@ -8,7 +8,7 @@
 
 ## 调用链与安全约束
 
-1. 查询实际 MCP 工具列表，只向模型发布服务端工具白名单内的五种工具。模型定义由真实 MCP 输入 Schema 投影而来，并启用 Responses strict mode：对象关闭额外字段、所有公开字段必填，可选值用 `null` 表示。
+1. 查询实际 MCP 工具列表，只向模型发布服务端工具白名单内的五种工具。模型定义由真实 MCP 输入 Schema 投影而来，并启用 Responses strict mode：对象关闭额外字段、所有公开字段必填，可选值用 `null` 表示。查询客户 Schema 的根级 `anyOf` 用于表达“名称或编码至少提供一项”，投影时移除该根级组合约束；完整 MCP 输入模型仍会校验此业务规则。
 2. 将任务方向、用户原文、输入时刻和 `Asia/Hong_Kong` 业务时区放入用户数据消息；可信身份不进入模型参数。
 3. 通过 OpenAI Responses API 请求模型自动选择工具；默认不在供应商保存 response 状态。
 4. 解析 JSON 参数并使用现有完整 MCP Pydantic 契约复核；未知工具、非对象参数、NaN/Infinity 和越界值均在 MCP 副作用前拒绝。
@@ -52,10 +52,10 @@ pwsh -NoProfile -File code/scripts/verify_issue_012.ps1
 
 脚本使用随机 Compose 项目名和临时回环端口，运行迁移、迁移一致性检查、示例数据初始化、真实 MCP 联调及相关 issue 回归；最终只删除本次随机项目及其数据卷，不停止其他容器。没有有效模型凭据时，脚本会明确报告在线模型验收未执行。
 
-当 `MODEL_PROVIDER=openai`、`MODEL_NAME` 和 `MODEL_API_KEY` 均配置后，同一脚本会额外运行在线模型场景。在线测试以隔离数据核验真实模型是否依次选择客户、合同、物料、草稿和余额工具，轨迹是否可回查，以及只产生草稿而不产生批准或订单。该测试会产生供应商 API 用量；当前仓库环境是否有可用凭据应以执行时状态为准。
+当 `MODEL_PROVIDER=openai`、`MODEL_NAME` 和 `MODEL_API_KEY` 均配置后，同一脚本会额外运行在线模型场景。在线测试以隔离数据核验真实模型是否依次选择客户、合同、物料、草稿和余额工具，轨迹是否可回查，以及只产生草稿而不产生批准或订单。该测试会产生供应商 API 用量；额度不足或供应商拒绝请求会使验证失败，不能视为跳过或通过。
 
 ## 限制与后续衔接
 
 - OpenAI strict Schema 不支持开放字典和任意 JSON 值。模型工具投影省略可选的 `business_fields`、`locator`、`raw_value`、`accepted_value` 字段，由 MCP 输入模型应用其已有默认值；`MCPToolClient` 仍按完整 MCP Schema 严格校验实际调用参数。更多约束见 [Function calling strict mode](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)。
 - 本轮实现真实 Responses API 调用组件、预算、输入/输出 Schema 检查、重试和可持久轨迹；Worker 还没有注册此函数循环为任务 job handler。由后续工作流 issue 在持久化状态图中调用，不能把直接组件测试误报为端到端 UI 任务验证。
-- 当前 `code/backend/.env` 中 `MODEL_PROVIDER`、`MODEL_NAME`、`MODEL_API_KEY` 为空；因此目前只能验证离线回路和真实 MCP 联调，真实在线模型工具选择仍未验证。
+- 在线验收通过必须以固定隔离场景真实完成全部 MCP 调用和数据库断言为证据。只通过离线回路与真实 MCP 联调，不能证明真实在线模型工具选择可用。

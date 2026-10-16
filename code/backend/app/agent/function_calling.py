@@ -681,6 +681,10 @@ def _strict_model_schema(schema: dict[str, Any]) -> dict[str, Any]:
     入参均为可选值；模型省略后由 MCP 输入模型使用既有默认值。
     """
     result = deepcopy(schema)
+    # query_customer 以根级 anyOf 表示“name/code 至少填一项”。Responses
+    # strict 不接受根级组合约束；MCP 输入模型仍会执行这项业务校验。
+    if result.get("type") == "object":
+        result.pop("anyOf", None)
     _normalize_strict_schema_node(result)
     if result.get("type") != "object" or not isinstance(result.get("properties"), dict):
         raise FunctionCallingFailure("MCP_TOOL_SCHEMA_INVALID", "model.tool_schema")

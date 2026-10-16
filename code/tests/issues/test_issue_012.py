@@ -17,6 +17,7 @@ from pydantic import SecretStr
 from app.agent.function_calling import (
     FunctionCallingFailure,
     FunctionCallingRunner,
+    _strict_model_schema,
     create_configured_model_client,
 )
 from app.agent.model_client import (
@@ -197,6 +198,24 @@ def _assert_strict_schema(schema: object) -> None:
         assert schema.get("required") == list(properties)
     for value in schema.values():
         _assert_strict_schema(value)
+
+
+def test_strict_query_customer_schema_moves_root_validation_to_mcp() -> None:
+    """根级 anyOf 不兼容 Responses strict；MCP 保留 name/code 业务校验。"""
+    source = INPUT_SCHEMAS["query_customer"].model_json_schema()
+    assert "anyOf" in source["properties"]["name"]
+    source["anyOf"] = [
+        {"required": ["name"]},
+        {"required": ["code"]},
+    ]
+
+    projected = _strict_model_schema(source)
+
+    assert projected["type"] == "object"
+    assert "anyOf" not in projected
+    _assert_strict_schema(projected)
+    with pytest.raises(ValueError):
+        INPUT_SCHEMAS["query_customer"].model_validate({}, strict=True)
 
 
 @pytest.mark.asyncio
