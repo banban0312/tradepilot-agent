@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     model_api_key: SecretStr | None = None
     ocr_provider: str | None = None
     ocr_api_key: SecretStr | None = None
+    demo_mode: bool = False
+    demo_password: SecretStr | None = None
+    session_ttl_hours: int = Field(default=12, gt=0, le=720)
+    session_cookie_secure: bool = True
+    app_origin: str | None = None
 
     @property
     def model_configuration_state(self) -> str:

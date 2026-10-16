@@ -26,6 +26,11 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       ATTACHMENTS_ROOT: /var/lib/tradepilot/attachments
+      DEMO_MODE: ${DEMO_MODE:-false}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      APP_ORIGIN: ${APP_ORIGIN:-}
     ports:
       - "127.0.0.1:${API_PORT:-8010}:8000"
     volumes:
@@ -111,6 +116,11 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       MCP_URL: http://mcp:8000/mcp
       TRADEPILOT_TEST_MODE: "1"
+      DEMO_MODE: ${DEMO_MODE:-false}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      APP_ORIGIN: ${APP_ORIGIN:-}
     depends_on:
       db:
         condition: service_healthy

@@ -6,9 +6,11 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 
+from app.auth.context import BUSINESS_APPROVER, BUSINESS_OPERATOR, SYSTEM_ADMIN
+from app.auth.passwords import hash_password
 from app.config import settings
 from app.models import (
     Contract,
@@ -20,6 +22,9 @@ from app.models import (
     Material,
     MaterialAlias,
     Project,
+    User,
+    UserDepartmentScope,
+    UserRole,
 )
 
 SEED_TIME = datetime(2025, 1, 1, tzinfo=UTC)
@@ -29,9 +34,9 @@ def _id(suffix: int) -> UUID:
     return UUID(f"00000000-0000-4000-8000-{suffix:012d}")
 
 
-def seed_rows() -> list[tuple[object, list[dict[str, object]]]]:
+def seed_rows(demo_password_hash: str | None = None) -> list[tuple[object, list[dict[str, object]]]]:
     """保持样本 ID 和业务值固定，便于不同环境复现同一组主数据。"""
-    return [
+    rows = [
         (
             Department.__table__,
             [
@@ -157,13 +162,59 @@ def seed_rows() -> list[tuple[object, list[dict[str, object]]]]:
             ],
         ),
     ]
+    if demo_password_hash is not None:
+        rows.extend(
+            [
+                (
+                    User.__table__,
+                    [
+                        {"id": _id(100), "login": "demo-operator-north", "password_hash": demo_password_hash, "department_id": _id(1), "active": True},
+                        {"id": _id(101), "login": "demo-operator-south", "password_hash": demo_password_hash, "department_id": _id(2), "active": True},
+                        {"id": _id(102), "login": "demo-approver-north", "password_hash": demo_password_hash, "department_id": _id(1), "active": True},
+                        {"id": _id(103), "login": "demo-admin", "password_hash": demo_password_hash, "department_id": _id(1), "active": True},
+                    ],
+                ),
+                (
+                    UserRole.__table__,
+                    [
+                        {"user_id": _id(100), "role": BUSINESS_OPERATOR},
+                        {"user_id": _id(101), "role": BUSINESS_OPERATOR},
+                        {"user_id": _id(102), "role": BUSINESS_APPROVER},
+                        {"user_id": _id(103), "role": SYSTEM_ADMIN},
+                    ],
+                ),
+                (
+                    UserDepartmentScope.__table__,
+                    [
+                        {"user_id": _id(100), "department_id": _id(1)},
+                        {"user_id": _id(101), "department_id": _id(2)},
+                        {"user_id": _id(102), "department_id": _id(1)},
+                        {"user_id": _id(103), "department_id": _id(1)},
+                        {"user_id": _id(103), "department_id": _id(2)},
+                    ],
+                ),
+            ]
+        )
+    return rows
 
 
 def run_seed() -> None:
+    demo_password_hash = None
+    if settings.demo_mode:
+        raw_password = settings.demo_password.get_secret_value() if settings.demo_password else ""
+        if not raw_password.strip():
+            raise RuntimeError("已启用 DEMO_MODE，但未设置 DEMO_PASSWORD；拒绝创建默认密码账号")
+        demo_password_hash = hash_password(raw_password)
+
     engine = create_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
     try:
         with engine.begin() as connection:
-            for table, rows in seed_rows():
+            seeded_rows = seed_rows(demo_password_hash)
+            if demo_password_hash is not None:
+                demo_user_ids = [_id(100), _id(101), _id(102), _id(103)]
+                connection.execute(delete(UserRole).where(UserRole.user_id.in_(demo_user_ids)))
+                connection.execute(delete(UserDepartmentScope).where(UserDepartmentScope.user_id.in_(demo_user_ids)))
+            for table, rows in seeded_rows:
                 if "created_at" in table.c:
                     for row in rows:
                         row["created_at"] = SEED_TIME
@@ -193,16 +244,20 @@ def run_seed() -> None:
                         .join(Contract, Contract.id == ContractLine.contract_id)
                         .where(Contract.number.like("TP-DEMO-%"))
                     )
+                elif table.name == "users":
+                    sample_scope = table.c.login.like("demo-%")
+                elif table.name in {"user_roles", "user_department_scopes"}:
+                    sample_scope = table.c.user_id.in_(select(User.id).where(User.login.like("demo-%")))
                 else:
                     raise RuntimeError(f"未定义演示数据隔离条件：{table.name}")
 
-                connection.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=primary_keys,
-                        set_=updates,
-                        where=sample_scope,
-                    )
-                )
+                if table.name == "users":
+                    # 重复 seed 保留已创建的密码哈希，不以新随机盐重置账号凭据。
+                    updates.pop("password_hash", None)
+                if updates:
+                    connection.execute(statement.on_conflict_do_update(index_elements=primary_keys, set_=updates, where=sample_scope))
+                else:
+                    connection.execute(statement.on_conflict_do_nothing(index_elements=primary_keys))
                 seeded_ids = [row[primary_keys[0]] for row in rows]
                 persisted_count = connection.scalar(
                     select(func.count())
