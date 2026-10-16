@@ -183,6 +183,22 @@ def _runner(model, mcp, trace, *, config=None, issued=None) -> FunctionCallingRu
     )
 
 
+def _assert_strict_schema(schema: object) -> None:
+    if isinstance(schema, list):
+        for item in schema:
+            _assert_strict_schema(item)
+        return
+    if not isinstance(schema, dict):
+        return
+    assert "default" not in schema
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        assert schema.get("additionalProperties") is False
+        assert schema.get("required") == list(properties)
+    for value in schema.values():
+        _assert_strict_schema(value)
+
+
 @pytest.mark.asyncio
 async def test_model_tool_choice_runs_mcp_and_returns_real_usage_shape() -> None:
     model = ScriptedModel(
@@ -220,6 +236,18 @@ async def test_model_tool_choice_runs_mcp_and_returns_real_usage_shape() -> None
     )
     assert len(model.requests[0]["tools"]) == 5
     assert model.requests[0]["tools"][0]["type"] == "function"
+    definitions = model.requests[0]["tools"]
+    assert all(definition["strict"] is True for definition in definitions)
+    for definition in definitions:
+        _assert_strict_schema(definition["parameters"])
+    draft_schema = next(
+        definition["parameters"]
+        for definition in definitions
+        if definition["name"] == "save_order_draft"
+    )
+    assert "business_fields" not in str(draft_schema)
+    assert "raw_value" not in str(draft_schema)
+    assert "accepted_value" not in str(draft_schema)
     assert model.requests[0]["input_items"][0]["role"] == "user"
     assert "2026-10-16" in model.requests[0]["input_items"][0]["content"]
     assert "Asia/Hong_Kong" in model.requests[0]["input_items"][0]["content"]

@@ -8,10 +8,10 @@
 
 ## 调用链与安全约束
 
-1. 查询实际 MCP 工具列表，只向模型发布服务端工具白名单内的五种工具及真实输入 JSON Schema。
+1. 查询实际 MCP 工具列表，只向模型发布服务端工具白名单内的五种工具。模型定义由真实 MCP 输入 Schema 投影而来，并启用 Responses strict mode：对象关闭额外字段、所有公开字段必填，可选值用 `null` 表示。
 2. 将任务方向、用户原文、输入时刻和 `Asia/Hong_Kong` 业务时区放入用户数据消息；可信身份不进入模型参数。
 3. 通过 OpenAI Responses API 请求模型自动选择工具；默认不在供应商保存 response 状态。
-4. 解析 JSON 参数并使用现有严格 Pydantic 契约复核；未知工具、非对象参数、NaN/Infinity 和越界值均在 MCP 副作用前拒绝。
+4. 解析 JSON 参数并使用现有完整 MCP Pydantic 契约复核；未知工具、非对象参数、NaN/Infinity 和越界值均在 MCP 副作用前拒绝。
 5. 每次 MCP 调用签发短时、单任务、单工具上下文。操作 ID 由持久 job ID、模型轮次和工具序号确定；临时故障重试时重新签名但复用操作 ID。
 6. MCP 返回值通过现有客户端输出 Schema 复核，再作为 JSON 数据回填 Responses API；模型指令明确合同/工具返回内容都只是数据。
 7. 工具查询、模型调用、MCP 请求与响应、调用耗时、真实模型标识和可用的 Token usage 写入任务轨迹。没有供应商 usage 时存为 unavailable，不补零。
@@ -56,6 +56,6 @@ pwsh -NoProfile -File code/scripts/verify_issue_012.ps1
 
 ## 限制与后续衔接
 
+- OpenAI strict Schema 不支持开放字典和任意 JSON 值。模型工具投影省略可选的 `business_fields`、`locator`、`raw_value`、`accepted_value` 字段，由 MCP 输入模型应用其已有默认值；`MCPToolClient` 仍按完整 MCP Schema 严格校验实际调用参数。更多约束见 [Function calling strict mode](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)。
 - 本轮实现真实 Responses API 调用组件、预算、输入/输出 Schema 检查、重试和可持久轨迹；Worker 还没有注册此函数循环为任务 job handler。由后续工作流 issue 在持久化状态图中调用，不能把直接组件测试误报为端到端 UI 任务验证。
 - 当前 `code/backend/.env` 中 `MODEL_PROVIDER`、`MODEL_NAME`、`MODEL_API_KEY` 为空；因此目前只能验证离线回路和真实 MCP 联调，真实在线模型工具选择仍未验证。
-- 模型参数是非严格 JSON Schema 模式以兼容复杂 MCP Schema；所有参数仍会在本地按严格 Pydantic 类型、额外字段禁用及业务规则复核。

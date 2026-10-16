@@ -8,6 +8,7 @@ import json
 import random
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -234,8 +235,8 @@ class FunctionCallingRunner:
                 "type": "function",
                 "name": name,
                 "description": TOOL_DESCRIPTIONS[name],
-                "parameters": available_tools[name],
-                "strict": False,
+                "parameters": _strict_model_schema(available_tools[name]),
+                "strict": True,
             }
             for name in sorted(REQUIRED_BUSINESS_TOOLS)
         ]
@@ -666,6 +667,62 @@ def _tool_value(tool: Any, field: str) -> Any:
     if value is None and hasattr(tool, "model_dump"):
         value = tool.model_dump(by_alias=True).get(field)
     return value
+
+
+_MODEL_OMITTED_INPUT_FIELDS = frozenset(
+    {"business_fields", "locator", "raw_value", "accepted_value"}
+)
+
+
+def _strict_model_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """将 MCP 契约投影为 Responses strict schema，MCP 仍执行完整本地校验。
+
+    开放字典/任意值字段不在 Structured Outputs 的可约束子集中，且这些
+    入参均为可选值；模型省略后由 MCP 输入模型使用既有默认值。
+    """
+    result = deepcopy(schema)
+    _normalize_strict_schema_node(result)
+    if result.get("type") != "object" or not isinstance(result.get("properties"), dict):
+        raise FunctionCallingFailure("MCP_TOOL_SCHEMA_INVALID", "model.tool_schema")
+    return result
+
+
+def _normalize_strict_schema_node(node: Any) -> None:
+    """递归补齐 strict 模式要求，剔除 MCP 默认值等模型侧元数据。"""
+    if isinstance(node, list):
+        for item in node:
+            _normalize_strict_schema_node(item)
+        return
+    if not isinstance(node, dict):
+        return
+
+    node.pop("default", None)
+    node.pop("title", None)
+    if "const" in node:
+        constant = node.pop("const")
+        node.setdefault("enum", [constant])
+
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        properties = {
+            name: value
+            for name, value in properties.items()
+            if name not in _MODEL_OMITTED_INPUT_FIELDS
+        }
+        node["properties"] = properties
+        node["required"] = list(properties)
+        node["additionalProperties"] = False
+    elif node.get("type") == "object":
+        node["properties"] = {}
+        node["required"] = []
+        node["additionalProperties"] = False
+
+    if node.get("additionalProperties") is True or isinstance(
+        node.get("additionalProperties"), dict
+    ):
+        raise FunctionCallingFailure("MCP_TOOL_SCHEMA_UNSUPPORTED", "model.tool_schema")
+    for value in node.values():
+        _normalize_strict_schema_node(value)
 
 
 def _snake_case(value: str) -> str:
