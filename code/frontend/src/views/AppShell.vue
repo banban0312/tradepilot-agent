@@ -17,16 +17,21 @@ const helpOpen = ref(false)
 const identity = computed(() => auth.identity)
 const roleText = computed(() => identity.value?.roles.map((role) => roleLabels[role] ?? '受限角色').join('、') ?? '')
 const userInitial = computed(() => identity.value?.login.slice(0, 1).toUpperCase() ?? 'U')
-const pageTitle = computed(() => route.name === 'interface-states' ? '界面状态与异常反馈' : '开始一笔新订单')
+const pageTitle = computed(() => {
+  if (route.name === 'interface-states') return '界面状态与异常反馈'
+  if (route.name === 'master-data') return '主数据与配置'
+  return '开始一笔新订单'
+})
 
-const navigation = [
+const navigationItems = [
   { label: '智能提单', icon: 'sparkles', route: 'workbench' },
   { label: '订单中心', icon: 'file' },
   { label: '批量导入', icon: 'grid' },
   { label: '任务追踪', icon: 'trace' },
   { label: '评测中心', icon: 'chart' },
-  { label: '主数据与配置', icon: 'sliders' },
+  { label: '主数据与配置', icon: 'sliders', route: 'master-data', adminOnly: true },
 ]
+const navigation = computed(() => navigationItems.filter((item) => !('adminOnly' in item) || identity.value?.roles.includes('system_admin')))
 
 function unavailable(label: string) {
   ui.notify(`${label}模块尚未接入，当前没有读取或展示业务数据。`)

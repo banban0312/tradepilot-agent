@@ -4,6 +4,7 @@ import AppShell from './views/AppShell.vue'
 import HomeView from './views/HomeView.vue'
 import InterfaceStatesView from './views/InterfaceStatesView.vue'
 import LoginView from './views/LoginView.vue'
+import MasterDataView from './views/MasterDataView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ export const router = createRouter({
       component: AppShell,
       children: [
         { path: '', name: 'workbench', component: HomeView },
+        { path: 'admin/master-data', name: 'master-data', component: MasterDataView, meta: { requiresSystemAdmin: true } },
         { path: 'interface-states', name: 'interface-states', component: InterfaceStatesView },
       ],
     },
@@ -39,6 +41,10 @@ router.beforeEach(async (to) => {
         ...(auth.errorCode === 'SESSION_EXPIRED' ? { reason: 'expired' } : {}),
       },
     }
+  }
+
+  if (to.meta.requiresSystemAdmin && !auth.identity.roles.includes('system_admin')) {
+    return { name: 'workbench' }
   }
 
   return true

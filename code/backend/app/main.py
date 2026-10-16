@@ -11,6 +11,7 @@ from app.auth.origin import is_same_origin
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.database import check_database_connection, engine
+from app.master_data.routes import router as admin_router
 
 
 @asynccontextmanager
@@ -22,6 +23,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="TradePilot API", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 @app.exception_handler(HTTPException)

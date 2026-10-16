@@ -261,7 +261,10 @@ class Project(TimestampMixin, Base):
 
 class Material(TimestampMixin, Base):
     __tablename__ = "materials"
-    __table_args__ = (UniqueConstraint("code", name="uq_materials_code"),)
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_materials_code"),
+        CheckConstraint("version > 0", name="ck_materials_version_positive"),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     code: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -269,6 +272,7 @@ class Material(TimestampMixin, Base):
     specification: Mapped[str] = mapped_column(Text, nullable=False)
     unit: Mapped[str] = mapped_column(String(16), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
 
 class MaterialAlias(TimestampMixin, Base):
