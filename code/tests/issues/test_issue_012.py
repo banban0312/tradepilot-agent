@@ -278,10 +278,11 @@ async def test_model_tool_choice_runs_mcp_and_returns_real_usage_shape() -> None
         for item in trace.finished
         if item.get("output_ref", {}).get("tool") == "query_customer"
     )
-    assert (
-        actual_tool_span["output_ref"]["result"]["data"]["source"]
-        == "isolated-mcp-fixture"
-    )
+    summary = actual_tool_span["output_ref"]["result_summary"]
+    assert "source" in summary["data_fields"]
+    assert "found" in summary["data_fields"]
+    assert "isolated-mcp-fixture" not in json.dumps(trace.finished, default=str)
+    assert "建联公司" not in json.dumps(trace.started, ensure_ascii=False, default=str)
 
 
 @pytest.mark.asyncio
@@ -510,9 +511,17 @@ async def test_function_calling_loop_uses_real_mcp_server_when_enabled() -> None
     assert any(
         span.name == "query_customer"
         and span.output_ref
-        and span.output_ref.get("result", {}).get("data", {}).get("candidates")
+        and span.output_ref.get("result_summary", {}).get("candidates_count", 0) > 0
         for span in spans
     ), "MCP 查询必须返回隔离数据库中的真实客户候选"
+    trace_evidence = json.dumps(
+        [
+            {"input_ref": span.input_ref, "output_ref": span.output_ref}
+            for span in spans
+        ],
+        ensure_ascii=False,
+    )
+    assert "华北示例客户" not in trace_evidence
     assert all(span.status == "OK" for span in spans)
     assert drafts == 0
     assert orders == 0

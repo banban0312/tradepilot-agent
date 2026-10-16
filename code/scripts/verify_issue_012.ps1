@@ -1,3 +1,7 @@
+param(
+    [switch]$OfflineOnly
+)
+
 $ErrorActionPreference = 'Stop'
 $codeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $envFile = Join-Path $codeRoot 'backend/.env'
@@ -32,13 +36,14 @@ $onlineModelConfigured = (
     -not [string]::IsNullOrWhiteSpace($modelValues['MODEL_NAME']) -and
     -not [string]::IsNullOrWhiteSpace($modelValues['MODEL_API_KEY'])
 )
+$runOnlineModel = $onlineModelConfigured -and -not $OfflineOnly
 $modelValues.Clear()
 
 $env:DEMO_MODE = 'true'
 $env:DEMO_PASSWORD = 'TP-Verify-' + [Guid]::NewGuid().ToString('N')
 $env:MCP_CONTEXT_SIGNING_KEY = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:TRADEPILOT_MCP_INTEGRATION = '1'
-$env:TRADEPILOT_ONLINE_MODEL = if ($onlineModelConfigured) { '1' } else { '0' }
+$env:TRADEPILOT_ONLINE_MODEL = if ($runOnlineModel) { '1' } else { '0' }
 $env:POSTGRES_PORT = Get-FreeLoopbackPort
 do { $env:API_PORT = Get-FreeLoopbackPort } while ($env:API_PORT -eq $env:POSTGRES_PORT)
 do { $env:MCP_HOST_PORT = Get-FreeLoopbackPort } while ($env:MCP_HOST_PORT -in @($env:POSTGRES_PORT, $env:API_PORT))
@@ -62,8 +67,11 @@ try {
     & docker @composeArgs run --rm --no-deps verify uv run --frozen python -m pytest -q /workspace/tests/issues/test_issue_008.py /workspace/tests/issues/test_issue_009.py /workspace/tests/issues/test_issue_010.py /workspace/tests/issues/test_issue_011.py /workspace/tests/issues/test_issue_012.py
     if ($LASTEXITCODE -ne 0) { throw "工具契约、真实 MCP、草稿幂等或 Function Calling 验证失败，退出码 $LASTEXITCODE。" }
 
-    if ($onlineModelConfigured) {
+    if ($runOnlineModel) {
         Write-Host '在线模型验收已执行：请确认 pytest 输出中的在线测试通过；此调用使用隔离示例数据，并按模型供应商计费规则产生用量。'
+    }
+    elseif ($OfflineOnly -and $onlineModelConfigured) {
+        Write-Warning '已通过 -OfflineOnly 禁用在线模型验收；真实模型工具选择仍未验证。'
     }
     else {
         Write-Warning '在线模型验收未执行：MODEL_PROVIDER、MODEL_NAME、MODEL_API_KEY 尚未完整配置。离线测试和真实 MCP 联调不代表在线模型工具选择通过。'

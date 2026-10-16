@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import random
 import time
@@ -318,14 +317,14 @@ class FunctionCallingRunner:
                     "response_id": response.response_id,
                     "model": response.model,
                     "attempts": response.attempts,
-                    "output_hash": hashlib.sha256(
-                        response.output_text.encode("utf-8")
-                    ).hexdigest(),
+                    "output_text_length": len(response.output_text),
                     "tool_calls": [
                         {
                             "call_id": call.get("call_id"),
                             "name": call.get("name"),
-                            "arguments_hash": _hash_text(call.get("arguments")),
+                            "argument_bytes": len(call["arguments"].encode("utf-8"))
+                            if isinstance(call.get("arguments"), str)
+                            else None,
                         }
                         for call in calls
                     ],
@@ -564,7 +563,7 @@ class FunctionCallingRunner:
                 input_ref={
                     "tool": name,
                     "call_id": call_id,
-                    "arguments_hash": _hash_text(raw_arguments),
+                    "argument_bytes": len(raw_arguments.encode("utf-8")),
                 },
             )
             raise FunctionCallingFailure(
@@ -590,7 +589,11 @@ class FunctionCallingRunner:
                     "call_id": call_id,
                     "tool": name,
                     "attempt": attempt,
-                    "arguments": arguments,
+                    "argument_fields": sorted(arguments),
+                    "argument_types": {
+                        key: _trace_value_kind(value)
+                        for key, value in sorted(arguments.items())
+                    },
                 },
             )
             started = time.monotonic()
@@ -621,7 +624,7 @@ class FunctionCallingRunner:
                         "call_id": call_id,
                         "tool": name,
                         "attempt": attempt,
-                        "result": result_data,
+                        "result_summary": _trace_result_summary(result_data),
                     },
                 )
                 return result_data
@@ -739,9 +742,45 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"JSON 常量不允许：{value}")
 
 
-def _hash_text(value: object) -> str:
-    text = value if isinstance(value, str) else ""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _trace_value_kind(value: Any) -> str:
+    """只记录参数类型，不把客户、合同、价格等原始值写入运行轨迹。"""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return "unknown"
+
+
+def _trace_result_summary(value: dict[str, Any]) -> dict[str, Any]:
+    """保留工具响应结构和计数，业务字段值留在已授权的业务数据域。"""
+    summary: dict[str, Any] = {"response_fields": sorted(value)}
+    data = value.get("data")
+    if isinstance(data, dict):
+        summary["data_fields"] = sorted(data)
+        for field in ("candidates", "lines"):
+            items = data.get(field)
+            if isinstance(items, list):
+                summary[f"{field}_count"] = len(items)
+    issues = value.get("issues")
+    if isinstance(issues, list):
+        summary["issue_count"] = len(issues)
+    source_refs = value.get("source_refs")
+    if isinstance(source_refs, list):
+        summary["source_ref_count"] = len(source_refs)
+    version = value.get("schema_version")
+    if isinstance(version, str):
+        summary["schema_version"] = version
+    return summary
 
 
 def _mcp_error_code(error: Exception) -> str:
