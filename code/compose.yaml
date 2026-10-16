@@ -55,6 +55,7 @@ services:
       - backend/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      MCP_CONTEXT_SIGNING_KEY: ${MCP_CONTEXT_SIGNING_KEY:-}
     volumes:
       - attachments:/var/lib/tradepilot/attachments
     depends_on:
@@ -76,6 +77,7 @@ services:
       - backend/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      MCP_CONTEXT_SIGNING_KEY: ${MCP_CONTEXT_SIGNING_KEY:-}
       MCP_URL: http://127.0.0.1:8000/mcp
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000
@@ -119,7 +121,9 @@ services:
       - backend/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      MCP_CONTEXT_SIGNING_KEY: ${MCP_CONTEXT_SIGNING_KEY:-}
       MCP_URL: http://mcp:8000/mcp
+      TRADEPILOT_MCP_INTEGRATION: "1"
       TRADEPILOT_TEST_MODE: "1"
       DEMO_MODE: ${DEMO_MODE:-false}
       DEMO_PASSWORD: ${DEMO_PASSWORD:-}
