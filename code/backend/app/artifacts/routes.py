@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import anyio
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,7 @@ from app.config import settings
 from app.database import async_session_factory, get_db_session
 from app.models import AgentTask, AuditEvent, InputArtifact, TaskArtifact, User
 from app.observability.service import append_task_event
+from app.parsing.pdf import PdfParseError, parse_pdf, sha256_file
 from app.storage.files import (
     FileUploadError,
     content_disposition,
@@ -200,6 +201,54 @@ async def get_artifact_metadata(
 ) -> dict[str, object]:
     artifact = await _readable_artifact(session, artifact_id, context)
     return {"data": _artifact_data(artifact)}
+
+
+@router.post("/artifacts/{artifact_id}/parse")
+async def parse_artifact_pdf(
+    artifact_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> JSONResponse:
+    """解析需经附件鉴权；内容仅作为原始证据返回，不触发 Agent 或业务动作。"""
+    artifact = await _readable_artifact(session, artifact_id, context)
+    if artifact.metadata_json.get("parse_intent") != "contract_pdf":
+        raise _api_error(415, "FILE_UNSUPPORTED", "当前解析接口仅支持合同 PDF")
+    if artifact.state != "STORED":
+        raise _api_error(404, "RESOURCE_NOT_FOUND", "附件内容不存在")
+    path = storage_path(settings.attachments_root, artifact.storage_key)
+    if path.is_symlink() or not path.is_file():
+        raise _api_error(503, "FILE_UNREADABLE", "附件存储暂不可用")
+    try:
+        digest = await anyio.to_thread.run_sync(partial(sha256_file, path))
+        if digest != artifact.sha256:
+            raise _api_error(503, "FILE_INTEGRITY_FAILED", "附件内容校验失败")
+        result = await anyio.to_thread.run_sync(partial(parse_pdf, path, digest))
+    except PdfParseError as exc:
+        raise _api_error(exc.status_code, exc.code, exc.message) from exc
+    session.add(
+        AuditEvent(
+            id=uuid4(),
+            task_id=None,
+            actor_id=context.user_id,
+            action="artifact.parsed",
+            object_ref={
+                "artifact_id": str(artifact.id),
+                "media_type": artifact.media_type,
+            },
+            after_ref={"state": result["state"], "page_count": result["page_count"]},
+            result="SUCCESS" if result["state"] == "COMPLETE" else "PARTIAL",
+            input_hash=artifact.sha256,
+        )
+    )
+    await session.commit()
+    return JSONResponse(
+        {"data": result, "request_id": request_id(request)},
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 async def _stream_file(path: Path) -> AsyncIterator[bytes]:

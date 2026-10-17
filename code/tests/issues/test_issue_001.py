@@ -35,7 +35,7 @@ def _test_connection_url() -> tuple[str, str, str]:
     return urlunsplit(psycopg_url), scoped_url, schema
 
 
-async def test_api_reports_database_readiness_and_unconfigured_integrations() -> None:
+async def test_api_reports_database_readiness_and_configured_local_ocr() -> None:
     async with httpx.AsyncClient(base_url="http://api:8000", timeout=5) as client:
         ready = await client.get("/health/ready")
         assert ready.status_code == 200
@@ -45,7 +45,10 @@ async def test_api_reports_database_readiness_and_unconfigured_integrations() ->
         assert configuration.status_code == 200
         body = configuration.json()
         assert body["model"]["status"] == "unconfigured"
-        assert body["ocr"]["status"] == "unconfigured"
+        assert body["ocr"] == {
+            "status": "configured_unverified",
+            "provider": "local_tesseract",
+        }
         assert "model_api_key" not in str(body)
         assert "ocr_api_key" not in str(body)
 
