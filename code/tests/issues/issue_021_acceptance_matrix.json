@@ -1,0 +1,22 @@
+[
+  {"ac":"AC-01","tests":[3,7,9,10,14,15,16,19,20],"coverage":"身份、角色、部门范围与跨部门拒绝","result":"regression","online":""},
+  {"ac":"AC-02","tests":[8,13],"coverage":"任务身份、会话恢复与销售采购隔离","result":"regression","online":""},
+  {"ac":"AC-03","tests":[13,21],"coverage":"WAITING_INPUT 与 WAITING_APPROVAL 各 10 次 Worker 容器重启","result":"live_restart_10_each","online":"真实隔离 Worker"},
+  {"ac":"AC-04","tests":[12,14,21],"coverage":"自然语言钢材字段、主数据价格与真实工具轨迹","result":"live_steel_flow","online":"DeepSeek 在线钢材闭环；不覆盖相对日期解析"},
+  {"ac":"AC-05","tests":[12,13,21],"coverage":"缺字段等待、补充输入和同任务继续","result":"live_steel_flow","online":"DeepSeek 在线钢材闭环"},
+  {"ac":"AC-06","tests":[9,12],"coverage":"工具 Schema 类型、必填、范围及 MCP 无副作用","result":"regression","online":"真实 MCP 集成"},
+  {"ac":"AC-07","tests":[12,14,21],"coverage":"在线模型选择业务工具及真实 MCP 调用轨迹","result":"live_mcp_trace","online":"DeepSeek 在线钢材闭环"},
+  {"ac":"AC-08","tests":[5,10,20],"coverage":"合同方向、停用状态、部门、客户与物料歧义","result":"regression","online":"真实数据库/MCP"},
+  {"ac":"AC-09","tests":[5,15],"coverage":"金额、数量、单位、日期规则和审批阻断","result":"regression","online":"真实规则服务"},
+  {"ac":"AC-10","tests":[14,18],"coverage":"草稿双向编辑、版本、重算和冲突","result":"regression","online":"真实 API/PostgreSQL"},
+  {"ac":"AC-11","tests":[5,15,16,18],"coverage":"超额阻断、等额允许及持久合同余额预览","result":"regression","online":"真实规则/事务"},
+  {"ac":"AC-12","tests":[16],"coverage":"不同订单竞争额度及余额、订单、占用事实","result":"regression","online":"并发 PostgreSQL 事务"},
+  {"ac":"AC-13","tests":[15,21],"coverage":"人工中断、退回、拒绝、批准及正式提单","result":"live_steel_flow","online":"真实授权审批与 Worker"},
+  {"ac":"AC-14","tests":[15,16,17],"coverage":"编辑使旧批准失效及过期恢复拒绝","result":"regression","online":"真实 API/PostgreSQL"},
+  {"ac":"AC-15","tests":[16,17,21],"coverage":"20 次幂等重放、一张订单与一笔额度占用","result":"regression_and_live","online":"真实数据库与在线钢材流程"},
+  {"ac":"AC-16","tests":[17],"coverage":"故障注入、未知提交回查和安全重试","result":"regression","online":"真实事务；模型故障使用明确故障注入"},
+  {"ac":"AC-17","tests":[19,21],"coverage":"类型/合同筛选、订单详情和批准快照对应","result":"live_steel_flow","online":"真实订单 API/PostgreSQL"},
+  {"ac":"AC-18","tests":[20],"coverage":"物料别名、停用合同最终阻断和历史快照","result":"regression","online":"真实 API/PostgreSQL"},
+  {"ac":"AC-19","tests":[6,17,21],"coverage":"成功/等待/失败事件、模型工具跨度、任务与订单关联","result":"live_trace","online":"真实 DeepSeek/MCP 与持久审计"},
+  {"ac":"AC-20","tests":[6,19,20],"coverage":"来源元数据、批准人、订单与操作审计；附件下载另验","result":"partial_m4_file_permission","online":"附件原文/哈希鉴权在 M4 #22 补验"}
+]
