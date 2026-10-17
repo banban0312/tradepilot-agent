@@ -12,6 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.master_data.normalization import normalize_material_name
 from app.mcp_server.contracts import (
     CheckContractBalanceInput,
     CheckContractBalanceOutput,
@@ -56,7 +57,7 @@ class MCPReadError(RuntimeError):
 
 def _normalize(value: str) -> str:
     """忽略空格和常见标点，但不推断缺失的规格数字。"""
-    return re.sub(r"[\s\-_/·（）()，,。]+", "", value).casefold()
+    return normalize_material_name(value)
 
 
 def _business_date(now: datetime | None = None) -> date:

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import AuthContext, require_business_access
+from app.master_data.normalization import normalize_material_name
 from app.models import (
     Contract,
     ContractBalance,
@@ -88,7 +89,7 @@ def _issue(code: str, field: str, message: str) -> DraftValidationIssue:
 
 
 def _normalize(value: str) -> str:
-    return re.sub(r"[\s\-_/·（）()]+", "", value).casefold()
+    return normalize_material_name(value)
 
 
 async def _suggest_materials(
