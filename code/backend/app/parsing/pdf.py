@@ -124,6 +124,9 @@ def _ocr_image(image_bytes: bytes, *, timeout: float) -> list[OcrLine]:
 
 def _field_candidates(
     pages: list[dict[str, Any]],
+    *,
+    include_conflicts: bool = False,
+    include_delivery_fields: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     patterns: dict[str, re.Pattern[str]] = {
         "contract_number": re.compile(
@@ -140,7 +143,7 @@ def _field_candidates(
             r"(?:规格型号|规格|型号)\s*[:：]?\s*([^，,；;\n]{1,40})"
         ),
         "quantity": re.compile(
-            r"(?:数量|qty|quantity)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(吨|t|kg|千克|件|套|米|根)?",
+            r"(?:数量|qty|quantity)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(吨|tons?|tonnes?|t|kg|千克|件|套|米|根)?",
             re.IGNORECASE,
         ),
         "amount": re.compile(
@@ -152,14 +155,23 @@ def _field_candidates(
             re.IGNORECASE,
         ),
     }
-    found: dict[str, dict[str, Any]] = {}
+    if include_delivery_fields:
+        patterns["recipient"] = re.compile(
+            r"(?:收货人|联系人|签收人|recipient|receiver|contact(?:\s+person)?)\s*[:：]?\s*([^，,；;\n]{2,30})",
+            re.IGNORECASE,
+        )
+        patterns["delivery_address"] = re.compile(
+            r"(?:收货地址|送货地址|卸货地址|交货地点|delivery\s+address|shipping\s+address)\s*[:：]?\s*([^，,；;\n]{4,80})",
+            re.IGNORECASE,
+        )
+    found: dict[str, list[dict[str, Any]]] = {}
     for page in pages:
         for line in page["lines"]:
             for field, pattern in patterns.items():
                 match = pattern.search(line["text"])
-                if not match or field in found:
+                if not match or (field in found and not include_conflicts):
                     continue
-                found[field] = {
+                candidate = {
                     "field": field,
                     "value": match.group(1).strip(),
                     "page_number": page["page_number"],
@@ -168,8 +180,29 @@ def _field_candidates(
                     "confidence": line["confidence"],
                     "confirmation_required": True,
                 }
+                if (
+                    include_conflicts
+                    and field == "quantity"
+                    and match.lastindex
+                    and match.lastindex >= 2
+                ):
+                    unit = match.group(2)
+                    if unit:
+                        candidate["unit"] = unit
+                if include_conflicts:
+                    found.setdefault(field, []).append(candidate)
+                else:
+                    found[field] = [candidate]
     required = list(patterns)
-    return list(found.values()), [field for field in required if field not in found]
+    fields: list[dict[str, Any]] = []
+    for candidates in found.values():
+        values = {candidate["value"] for candidate in candidates}
+        status = "CONFLICT" if len(values) > 1 else "NEEDS_CONFIRMATION"
+        fields.extend(
+            {**candidate, "status": status} if include_conflicts else candidate
+            for candidate in candidates
+        )
+    return fields, [field for field in required if field not in found]
 
 
 def parse_pdf(path: Path, input_sha256: str) -> dict[str, Any]:
