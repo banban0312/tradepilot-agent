@@ -13,9 +13,9 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.auth.context import AuthContext
 from app.config import settings
@@ -121,6 +121,48 @@ async def append_task_event(
     session.add(event)
     await session.flush()
     return event
+
+
+async def append_task_event_on_connection(
+    connection: AsyncConnection,
+    *,
+    task_id: UUID,
+    event_type: str,
+    payload: dict[str, Any],
+    span_id: UUID | None = None,
+    emitted_at: datetime | None = None,
+) -> int:
+    """在调用方连接事务内追加事件，供租约状态写入与事件原子提交。"""
+    if not event_type.strip():
+        raise ValueError("event_type 不能为空")
+    await connection.execute(
+        pg_insert(TaskEventCursor)
+        .values(task_id=task_id, next_seq=1)
+        .on_conflict_do_nothing(index_elements=[TaskEventCursor.task_id])
+    )
+    seq = await connection.scalar(
+        select(TaskEventCursor.next_seq)
+        .where(TaskEventCursor.task_id == task_id)
+        .with_for_update()
+    )
+    if seq is None:
+        raise RuntimeError("任务事件游标无法创建")
+    await connection.execute(
+        update(TaskEventCursor)
+        .where(TaskEventCursor.task_id == task_id)
+        .values(next_seq=seq + 1)
+    )
+    await connection.execute(
+        insert(TaskEvent).values(
+            task_id=task_id,
+            seq=seq,
+            event_type=event_type,
+            span_id=span_id,
+            payload=_normalized_json(payload),
+            emitted_at=emitted_at or datetime.now(UTC),
+        )
+    )
+    return int(seq)
 
 
 async def start_span(
@@ -237,6 +279,20 @@ async def finish_span(
             },
             emitted_at=span.end_at,
         )
+        if span.kind.casefold() == "tool" and status == "OK":
+            await append_task_event(
+                session,
+                task_id=span.task_id,
+                event_type="tool.completed",
+                span_id=span.id,
+                payload={
+                    "span_id": span.id,
+                    "name": span.name,
+                    "duration_ms": duration_ms,
+                    "output_ref": span.output_ref,
+                },
+                emitted_at=span.end_at,
+            )
     return span
 
 

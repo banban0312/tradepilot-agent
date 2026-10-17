@@ -91,6 +91,9 @@ def build_task_graph(
             return {
                 "input_history": history,
                 "input_at": str(resumed.get("input_at", state.get("input_at", ""))),
+                "draft_version": resumed.get("expected_version")
+                if isinstance(resumed.get("expected_version"), int)
+                else state.get("draft_version"),
                 "command_id": str(resumed.get("id", "")),
                 "command_kind": "INPUT",
                 "resume_command": {},

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import BUSINESS_OPERATOR, AuthContext, require_role
 from app.models import Draft, DraftItem, DraftRevision, FieldEvidence
+from app.observability.service import append_task_event
 
 from .types import (
     CandidateOrder,
@@ -219,6 +220,17 @@ async def save_candidate(
         )
     draft.current_version = next_version
     await session.flush()
+    if draft.task_id is not None:
+        await append_task_event(
+            session,
+            task_id=draft.task_id,
+            event_type="draft.updated",
+            payload={
+                "draft_id": str(draft.id),
+                "version": next_version,
+                "content_hash": digest,
+            },
+        )
     return DraftSaveResult(
         draft_id=draft.id,
         version=next_version,

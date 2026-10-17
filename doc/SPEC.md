@@ -527,7 +527,7 @@ PostgreSQL 行锁能够协调对相同行的并发修改；本稿据此选择合
 
 | 编号 | 方法/路径 | 入参 | 成功响应 | 主要错误 |
 |---|---|---|---|---|
-| API-01 | `POST /tasks` | `session_id?`、`order_type`、`input:{text?,artifact_ids[]}`；至少一种输入；幂等 key | 202：task_id、command_id、state=RUNNING、status_url | AUTH_REQUIRED、INPUT_INVALID、ARTIFACT_FORBIDDEN、IDEMPOTENCY_CONFLICT |
+| API-01 | `POST /tasks` | `session_id?`、`order_type`、`input:{text?,artifact_ids[]}`；至少一种输入；幂等 key | 202：task_id、command_id、当前任务投影状态（新任务通常为 `QUEUED`）、status_url | AUTH_REQUIRED、INPUT_INVALID、ARTIFACT_FORBIDDEN、IDEMPOTENCY_CONFLICT |
 | API-02 | `GET /tasks/{task_id}` | task_id | 200：状态、projection_version、当前草稿/缺失项、active_wait、order_ref、last_error、可用动作 | RESOURCE_NOT_FOUND、ACCESS_DENIED |
 | API-03 | `POST /tasks/{task_id}/inputs` | `interrupt_id`、`checkpoint_id`、`expected_draft_version?`、`text` 或确认字段、artifact_ids；幂等 key | 202：command_id、原 task_id | WAIT_CONFLICT、VERSION_CONFLICT、TASK_NOT_WAITING |
 | API-04 | `PATCH /tasks/{task_id}/draft` | `expected_version`、允许字段白名单 patch、`interrupt_id`、`checkpoint_id`；幂等 key | 200：新版本/哈希/校验结果、同步命令 ID；重新校验异步进行 | VERSION_CONFLICT、DRAFT_LOCKED、PATCH_FIELD_FORBIDDEN |

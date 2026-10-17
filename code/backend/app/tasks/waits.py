@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentTask, TaskCommand, TaskWait
+from app.observability.service import append_task_event
 from app.tasks.service import StaleExecutionEpoch, TaskExecutionLease
 
 
@@ -66,6 +67,15 @@ async def project_wait(
         task.current_step = "await_input" if kind == "input" else "await_review"
         task.projection_version += 1
         await session.flush()
+        await append_task_event(
+            session,
+            task_id=lease.task_id,
+            event_type="task.status_changed",
+            payload={
+                "state": wait_state,
+                "projection_version": task.projection_version,
+            },
+        )
         return wait
 
 
@@ -229,3 +239,12 @@ async def complete_resume_projection(
             task.checkpoint_ref = str(result.get("checkpoint_ref") or checkpoint_ref)
             task.current_step = "persist_draft"
         task.projection_version += 1
+        await append_task_event(
+            session,
+            task_id=lease.task_id,
+            event_type="task.status_changed",
+            payload={
+                "state": task.state,
+                "projection_version": task.projection_version,
+            },
+        )
