@@ -147,7 +147,10 @@ class DatabaseWorkflowServices:
                 or wait is None
                 or wait.pending_command_id != command.id
                 or command.target_interrupt_id != wait.interrupt_id
-                or wait.draft_version != command.expected_version
+                or (
+                    command.expected_version is not None
+                    and wait.draft_version != command.expected_version
+                )
             ):
                 raise WorkflowResumeConflict("恢复命令与当前有效等待或草稿版本不匹配")
             text = command.payload.get("text")
@@ -156,6 +159,7 @@ class DatabaseWorkflowServices:
             return {
                 "id": str(command.id),
                 "text": text,
+                "expected_version": command.expected_version,
                 "input_at": str(
                     command.payload.get("input_at", command.created_at.isoformat())
                 ),

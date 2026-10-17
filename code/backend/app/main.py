@@ -5,12 +5,14 @@ from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.auth.origin import is_same_origin
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.database import check_database_connection, engine
+from app.tasks.routes import router as tasks_router
 
 
 @asynccontextmanager
@@ -22,6 +24,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="TradePilot API", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(tasks_router)
 
 
 @app.exception_handler(HTTPException)
@@ -42,6 +45,34 @@ async def handle_http_error(request: Request, error: HTTPException) -> JSONRespo
         )
     return JSONResponse(
         status_code=error.status_code, content={"detail": detail}, headers=error.headers
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    request: Request, error: RequestValidationError
+) -> JSONResponse:
+    """把框架校验失败收敛为稳定错误结构，且不回显用户提交值。"""
+    fields = [
+        {
+            "field": ".".join(
+                str(part) for part in item.get("loc", ()) if part != "body"
+            ),
+            "type": item.get("type", "invalid"),
+        }
+        for item in error.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "INPUT_INVALID",
+                "message": "请求参数格式无效",
+                "retryable": False,
+                "details": {"fields": fields},
+            },
+            "request_id": getattr(request.state, "request_id", ""),
+        },
     )
 
 

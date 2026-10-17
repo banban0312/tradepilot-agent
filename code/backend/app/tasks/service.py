@@ -14,6 +14,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.models import AgentTask, TaskCommand, TaskJob, TaskSession
+from app.observability.service import append_task_event_on_connection
 
 MAX_ACTIVE_TASKS = 5
 JOB_KIND_RUN_TASK = "RUN_TASK"
@@ -226,7 +227,7 @@ class TaskExecutionLease:
                               state = 'RUNNING', projection_version = projection_version + 1,
                               updated_at = now()
                            WHERE id = :task_id
-                           RETURNING execution_epoch"""),
+                           RETURNING execution_epoch, projection_version"""),
                     {"task_id": task_id},
                 )).first()
                 if row is None:
@@ -241,6 +242,12 @@ class TaskExecutionLease:
                 )
                 if result.rowcount != 1:
                     raise StaleExecutionEpoch("作业领取已失效")
+                await append_task_event_on_connection(
+                    connection,
+                    task_id=task_id,
+                    event_type="task.status_changed",
+                    payload={"state": "RUNNING", "projection_version": int(row[1])},
+                )
             return cls(connection, task_id, job_id, worker_id, epoch)
         except BaseException:
             await connection.execute(
@@ -325,21 +332,32 @@ class TaskExecutionLease:
                           checkpoint_ref=COALESCE(:checkpoint_ref, checkpoint_ref),
                           current_step=:current_step,
                           projection_version=projection_version+1, updated_at=now()
-                       WHERE id=:task_id AND execution_epoch=:epoch"""),
+                       WHERE id=:task_id AND execution_epoch=:epoch
+                       RETURNING projection_version"""),
                 {"state": state, "checkpoint_ref": checkpoint_ref,
                  "current_step": current_step, "task_id": self.task_id,
                  "epoch": self.epoch},
             )
             if result.rowcount != 1:
                 raise StaleExecutionEpoch("任务状态投影已失效")
+            await append_task_event_on_connection(
+                connection,
+                task_id=self.task_id,
+                event_type="task.status_changed",
+                payload={
+                    "state": state,
+                    "projection_version": result.scalar_one(),
+                },
+            )
 
     async def finish(self, *, error: dict[str, object] | None = None) -> None:
         async with self.write_transaction() as connection:
             if error is None:
-                task_state = await connection.scalar(
-                    text("SELECT state FROM agent_tasks WHERE id=:task_id"),
+                task_state_row = await connection.execute(
+                    text("SELECT state, last_error FROM agent_tasks WHERE id=:task_id"),
                     {"task_id": self.task_id},
                 )
+                task_state, task_error = task_state_row.one()
                 if task_state == "RUNNING":
                     raise ValueError("完成作业前必须投影等待、失败或终态")
                 result = await connection.execute(
@@ -355,6 +373,13 @@ class TaskExecutionLease:
                     text("UPDATE task_commands SET state='APPLIED' WHERE id=(SELECT command_id FROM jobs WHERE id=:job_id) AND state='READY'"),
                     {"job_id": self.job_id},
                 )
+                if task_state == "FAILED":
+                    await append_task_event_on_connection(
+                        connection,
+                        task_id=self.task_id,
+                        event_type="task.failed",
+                        payload={"error": task_error or {}},
+                    )
             else:
                 result = await connection.execute(
                     text("""UPDATE jobs SET state='FAILED', heartbeat_at=now()
@@ -365,16 +390,32 @@ class TaskExecutionLease:
                 )
                 if result.rowcount != 1:
                     raise StaleExecutionEpoch("失败作业投影已失效")
-                await connection.execute(
+                task_update = await connection.execute(
                     text("""UPDATE agent_tasks SET state='FAILED', last_error=CAST(:error AS jsonb),
                               projection_version=projection_version+1, updated_at=now()
-                           WHERE id=:task_id AND execution_epoch=:epoch"""),
+                           WHERE id=:task_id AND execution_epoch=:epoch
+                           RETURNING projection_version"""),
                     {"task_id": self.task_id, "epoch": self.epoch,
                      "error": json.dumps(error, ensure_ascii=False)},
                 )
                 await connection.execute(
                     text("UPDATE task_commands SET state='REJECTED' WHERE id=(SELECT command_id FROM jobs WHERE id=:job_id) AND state='READY'"),
                     {"job_id": self.job_id},
+                )
+                await append_task_event_on_connection(
+                    connection,
+                    task_id=self.task_id,
+                    event_type="task.status_changed",
+                    payload={
+                        "state": "FAILED",
+                        "projection_version": task_update.scalar_one(),
+                    },
+                )
+                await append_task_event_on_connection(
+                    connection,
+                    task_id=self.task_id,
+                    event_type="task.failed",
+                    payload={"error": error},
                 )
 
     async def release(self) -> None:
@@ -411,12 +452,23 @@ async def recover_abandoned_jobs(
                            WHERE id=:job_id AND state='RUNNING'"""),
                     {"job_id": job_id},
                 )
-                await connection.execute(
+                task_update = await connection.execute(
                     text("""UPDATE agent_tasks SET execution_epoch=execution_epoch+1,
                               state=CASE WHEN state='RUNNING' THEN 'QUEUED' ELSE state END,
                               projection_version=projection_version+1, updated_at=now()
-                           WHERE id=:task_id"""),
+                           WHERE id=:task_id RETURNING state, projection_version"""),
                     {"task_id": task_id},
+                )
+                task_state, projection_version = task_update.one()
+                await append_task_event_on_connection(
+                    connection,
+                    task_id=task_id,
+                    event_type="task.status_changed",
+                    payload={
+                        "state": task_state,
+                        "projection_version": projection_version,
+                        "recovered": True,
+                    },
                 )
             recovered += 1
         finally:
