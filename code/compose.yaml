@@ -28,6 +28,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       ATTACHMENTS_ROOT: /var/lib/tradepilot/attachments
       DEMO_MODE: ${DEMO_MODE:-false}
+      DEMO_ALLOW_SELF_APPROVAL: ${DEMO_ALLOW_SELF_APPROVAL:-false}
       DEMO_PASSWORD: ${DEMO_PASSWORD:-}
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
@@ -60,6 +61,8 @@ services:
       - attachments:/var/lib/tradepilot/attachments
     depends_on:
       db:
+        condition: service_healthy
+      mcp:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "uv", "run", "--frozen", "python", "-m", "app.worker.healthcheck"]
@@ -126,10 +129,12 @@ services:
       TRADEPILOT_MCP_INTEGRATION: "1"
       TRADEPILOT_TEST_MODE: "1"
       DEMO_MODE: ${DEMO_MODE:-false}
+      DEMO_ALLOW_SELF_APPROVAL: ${DEMO_ALLOW_SELF_APPROVAL:-false}
       DEMO_PASSWORD: ${DEMO_PASSWORD:-}
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
       APP_ORIGIN: ${APP_ORIGIN:-}
+      TRADEPILOT_ONLINE_MODEL: ${TRADEPILOT_ONLINE_MODEL:-0}
     depends_on:
       db:
         condition: service_healthy

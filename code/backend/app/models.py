@@ -23,6 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -37,7 +38,10 @@ class TimestampMixin:
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
 
@@ -62,7 +66,9 @@ class User(TimestampMixin, Base):
     login: Mapped[str] = mapped_column(String(64), nullable=False)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     department_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
@@ -80,7 +86,9 @@ class UserRole(Base):
 
 class UserDepartmentScope(Base):
     __tablename__ = "user_department_scopes"
-    __table_args__ = (Index("ix_user_department_scopes_department_id", "department_id"),)
+    __table_args__ = (
+        Index("ix_user_department_scopes_department_id", "department_id"),
+    )
 
     user_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -104,7 +112,9 @@ class AuthSession(Base):
     user_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -117,10 +127,15 @@ class TaskSession(TimestampMixin, Base):
     __tablename__ = "sessions"
     __table_args__ = (
         Index("ix_sessions_owner_updated", "owner_id", "updated_at"),
-        ForeignKeyConstraint(["owner_id"], ["users.id"], name="fk_sessions_owner", ondelete="RESTRICT"),
         ForeignKeyConstraint(
-            ["last_task_id"], ["agent_tasks.id"], name="fk_sessions_last_task",
-            ondelete="RESTRICT", use_alter=True,
+            ["owner_id"], ["users.id"], name="fk_sessions_owner", ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["last_task_id"],
+            ["agent_tasks.id"],
+            name="fk_sessions_last_task",
+            ondelete="RESTRICT",
+            use_alter=True,
         ),
     )
 
@@ -135,18 +150,36 @@ class AgentTask(TimestampMixin, Base):
 
     __tablename__ = "agent_tasks"
     __table_args__ = (
-        CheckConstraint("task_type IN ('SALES', 'PURCHASE')", name="ck_agent_tasks_type"),
         CheckConstraint(
-            "state IN ('QUEUED', 'RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'BLOCKED_RULE', 'FAILED', 'COMPLETED', 'REJECTED')",
+            "task_type IN ('SALES', 'PURCHASE')", name="ck_agent_tasks_type"
+        ),
+        CheckConstraint(
+            "state IN ('QUEUED', 'RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'SUBMITTING', 'BLOCKED_RULE', 'FAILED', 'COMPLETED', 'REJECTED')",
             name="ck_agent_tasks_state",
         ),
-        CheckConstraint("execution_epoch >= 0", name="ck_agent_tasks_epoch_nonnegative"),
-        CheckConstraint("projection_version >= 0", name="ck_agent_tasks_projection_nonnegative"),
+        CheckConstraint(
+            "execution_epoch >= 0", name="ck_agent_tasks_epoch_nonnegative"
+        ),
+        CheckConstraint(
+            "projection_version >= 0", name="ck_agent_tasks_projection_nonnegative"
+        ),
         Index("ix_agent_tasks_owner_created", "owner_id", "created_at"),
         Index("ix_agent_tasks_department_state", "department_id", "state"),
-        ForeignKeyConstraint(["session_id"], ["sessions.id"], name="fk_agent_tasks_session", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["owner_id"], ["users.id"], name="fk_agent_tasks_owner", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["department_id"], ["departments.id"], name="fk_agent_tasks_department", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["session_id"],
+            ["sessions.id"],
+            name="fk_agent_tasks_session",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["owner_id"], ["users.id"], name="fk_agent_tasks_owner", ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["department_id"],
+            ["departments.id"],
+            name="fk_agent_tasks_department",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -154,10 +187,18 @@ class AgentTask(TimestampMixin, Base):
     owner_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     task_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    graph_version: Mapped[str] = mapped_column(String(64), nullable=False, server_default="v1")
-    state: Mapped[str] = mapped_column(String(32), nullable=False, server_default="QUEUED")
-    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    projection_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    graph_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default="v1"
+    )
+    state: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="QUEUED"
+    )
+    execution_epoch: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    projection_version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
     checkpoint_ref: Mapped[str | None] = mapped_column(Text)
     current_step: Mapped[str | None] = mapped_column(Text)
     last_error: Mapped[dict[str, object] | None] = mapped_column(JSONB)
@@ -175,8 +216,18 @@ class TaskCommand(Base):
             name="ck_task_commands_state",
         ),
         Index("ix_task_commands_task_created", "task_id", "created_at"),
-        ForeignKeyConstraint(["task_id"], ["agent_tasks.id"], name="fk_task_commands_task", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["actor_id"], ["users.id"], name="fk_task_commands_actor", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_task_commands_task",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_id"],
+            ["users.id"],
+            name="fk_task_commands_actor",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -188,7 +239,9 @@ class TaskCommand(Base):
     target_interrupt_id: Mapped[str | None] = mapped_column(Text)
     request_id: Mapped[str] = mapped_column(String(128), nullable=False)
     payload_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="READY")
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="READY"
+    )
     result_ref: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -201,19 +254,30 @@ class TaskJob(Base):
     __tablename__ = "jobs"
     __table_args__ = (
         UniqueConstraint("command_id", "kind", name="uq_jobs_command_kind"),
-        CheckConstraint("state IN ('READY', 'RUNNING', 'DONE', 'FAILED')", name="ck_jobs_state"),
+        CheckConstraint(
+            "state IN ('READY', 'RUNNING', 'DONE', 'FAILED')", name="ck_jobs_state"
+        ),
         CheckConstraint("attempts >= 0", name="ck_jobs_attempts_nonnegative"),
         Index("ix_jobs_state_available", "state", "available_at"),
         Index("ix_jobs_task_state", "task_id", "state"),
-        ForeignKeyConstraint(["task_id"], ["agent_tasks.id"], name="fk_jobs_task", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["command_id"], ["task_commands.id"], name="fk_jobs_command", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["task_id"], ["agent_tasks.id"], name="fk_jobs_task", ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["command_id"],
+            ["task_commands.id"],
+            name="fk_jobs_command",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="READY")
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="READY"
+    )
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     available_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -221,6 +285,120 @@ class TaskJob(Base):
     worker_id: Mapped[str | None] = mapped_column(String(128))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_epoch: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class TaskWait(Base):
+    """当前图中断的业务投影；checkpoint 本身仍由官方 LangGraph 表维护。"""
+
+    __tablename__ = "task_waits"
+    __table_args__ = (
+        CheckConstraint("kind IN ('INPUT', 'APPROVAL')", name="ck_task_waits_kind"),
+        ForeignKeyConstraint(
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_task_waits_task",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["pending_command_id"],
+            ["task_commands.id"],
+            name="fk_task_waits_pending_command",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["consumed_command_id"],
+            ["task_commands.id"],
+            name="fk_task_waits_consumed_command",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "checkpoint_ref", "interrupt_id", name="uq_task_waits_checkpoint_interrupt"
+        ),
+        Index(
+            "uq_task_waits_active_task",
+            "task_id",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+        Index("ix_task_waits_task_created", "task_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    checkpoint_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    interrupt_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    draft_version: Mapped[int | None] = mapped_column(Integer)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    pending_command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    consumed_command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TaskApproval(Base):
+    """不可变人工决定；有效性由当前草稿版本与 invalidated_at 共同约束。"""
+
+    __tablename__ = "task_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('APPROVE', 'RETURN', 'REJECT')",
+            name="ck_task_approvals_decision",
+        ),
+        CheckConstraint("version > 0", name="ck_task_approvals_version_positive"),
+        ForeignKeyConstraint(
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_task_approvals_task",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["command_id"],
+            ["task_commands.id"],
+            name="fk_task_approvals_command",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["draft_id"],
+            ["drafts.id"],
+            name="fk_task_approvals_draft",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["actor_id"],
+            ["users.id"],
+            name="fk_task_approvals_actor",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["department_id"],
+            ["departments.id"],
+            name="fk_task_approvals_department",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("command_id", name="uq_task_approvals_command"),
+        Index("ix_task_approvals_task_created", "task_id", "created_at"),
+        Index("ix_task_approvals_draft_version", "draft_id", "version"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    command_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    draft_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    actor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    checkpoint_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    interrupt_id: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class Customer(TimestampMixin, Base):
@@ -235,7 +413,9 @@ class Customer(TimestampMixin, Base):
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     department_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     contact: Mapped[str | None] = mapped_column(Text)
     address: Mapped[str | None] = mapped_column(Text)
@@ -254,7 +434,9 @@ class Project(TimestampMixin, Base):
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     department_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     delivery_address: Mapped[str | None] = mapped_column(Text)
 
@@ -278,14 +460,20 @@ class Material(TimestampMixin, Base):
 class MaterialAlias(TimestampMixin, Base):
     __tablename__ = "material_aliases"
     __table_args__ = (
-        UniqueConstraint("material_id", "normalized_alias", name="uq_material_aliases_material_normalized"),
+        UniqueConstraint(
+            "material_id",
+            "normalized_alias",
+            name="uq_material_aliases_material_normalized",
+        ),
         Index("ix_material_aliases_normalized_alias", "normalized_alias"),
         Index("ix_material_aliases_material_id", "material_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     material_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("materials.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("materials.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     alias: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_alias: Mapped[str] = mapped_column(Text, nullable=False)
@@ -294,7 +482,9 @@ class MaterialAlias(TimestampMixin, Base):
 class Contract(TimestampMixin, Base):
     __tablename__ = "contracts"
     __table_args__ = (
-        UniqueConstraint("department_id", "number", name="uq_contracts_department_number"),
+        UniqueConstraint(
+            "department_id", "number", name="uq_contracts_department_number"
+        ),
         UniqueConstraint("id", "department_id", name="uq_contracts_id_department"),
         ForeignKeyConstraint(
             ["customer_id", "department_id"],
@@ -310,7 +500,9 @@ class Contract(TimestampMixin, Base):
         ),
         CheckConstraint("type IN ('SALES', 'PURCHASE')", name="ck_contracts_type"),
         CheckConstraint("status IN ('ACTIVE', 'INACTIVE')", name="ck_contracts_status"),
-        CheckConstraint("total_amount >= 0", name="ck_contracts_total_amount_nonnegative"),
+        CheckConstraint(
+            "total_amount >= 0", name="ck_contracts_total_amount_nonnegative"
+        ),
         CheckConstraint("valid_to >= valid_from", name="ck_contracts_valid_date_range"),
         CheckConstraint("version > 0", name="ck_contracts_version_positive"),
         Index("ix_contracts_customer_department", "customer_id", "department_id"),
@@ -321,7 +513,9 @@ class Contract(TimestampMixin, Base):
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     number: Mapped[str] = mapped_column(String(64), nullable=False)
     department_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     type: Mapped[str] = mapped_column(String(16), nullable=False)
     customer_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
@@ -337,18 +531,33 @@ class Contract(TimestampMixin, Base):
 class ContractLine(TimestampMixin, Base):
     __tablename__ = "contract_lines"
     __table_args__ = (
-        UniqueConstraint("contract_id", "material_id", "unit", name="uq_contract_lines_contract_material_unit"),
-        CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_contract_lines_unit_price_nonnegative"),
-        CheckConstraint("max_quantity IS NULL OR max_quantity >= 0", name="ck_contract_lines_max_quantity_nonnegative"),
+        UniqueConstraint(
+            "contract_id",
+            "material_id",
+            "unit",
+            name="uq_contract_lines_contract_material_unit",
+        ),
+        CheckConstraint(
+            "unit_price IS NULL OR unit_price >= 0",
+            name="ck_contract_lines_unit_price_nonnegative",
+        ),
+        CheckConstraint(
+            "max_quantity IS NULL OR max_quantity >= 0",
+            name="ck_contract_lines_max_quantity_nonnegative",
+        ),
         Index("ix_contract_lines_material_id", "material_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     contract_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("contracts.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("contracts.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     material_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("materials.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("materials.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     unit: Mapped[str] = mapped_column(String(16), nullable=False)
     unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
@@ -358,29 +567,44 @@ class ContractLine(TimestampMixin, Base):
 class ContractBalance(TimestampMixin, Base):
     __tablename__ = "contract_balances"
     __table_args__ = (
-        CheckConstraint("occupied_amount >= 0", name="ck_contract_balances_amount_nonnegative"),
-        CheckConstraint("occupied_order_count >= 0", name="ck_contract_balances_order_count_nonnegative"),
-        CheckConstraint("version >= 0", name="ck_contract_balances_version_nonnegative"),
+        CheckConstraint(
+            "occupied_amount >= 0", name="ck_contract_balances_amount_nonnegative"
+        ),
+        CheckConstraint(
+            "occupied_order_count >= 0",
+            name="ck_contract_balances_order_count_nonnegative",
+        ),
+        CheckConstraint(
+            "version >= 0", name="ck_contract_balances_version_nonnegative"
+        ),
     )
 
     contract_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("contracts.id", ondelete="RESTRICT"), primary_key=True
+        Uuid(as_uuid=True),
+        ForeignKey("contracts.id", ondelete="RESTRICT"),
+        primary_key=True,
     )
     occupied_amount: Mapped[Decimal] = mapped_column(
         Numeric(20, 2), nullable=False, server_default="0"
     )
-    occupied_order_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    occupied_order_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class ContractLineBalance(TimestampMixin, Base):
     __tablename__ = "contract_line_balances"
     __table_args__ = (
-        CheckConstraint("occupied_quantity >= 0", name="ck_contract_line_balances_nonnegative"),
+        CheckConstraint(
+            "occupied_quantity >= 0", name="ck_contract_line_balances_nonnegative"
+        ),
     )
 
     contract_line_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("contract_lines.id", ondelete="RESTRICT"), primary_key=True
+        Uuid(as_uuid=True),
+        ForeignKey("contract_lines.id", ondelete="RESTRICT"),
+        primary_key=True,
     )
     occupied_quantity: Mapped[Decimal] = mapped_column(
         Numeric(18, 6), nullable=False, server_default="0"
@@ -393,7 +617,10 @@ class MCPToolEffect(Base):
     __tablename__ = "tool_effects"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["task_id"], ["agent_tasks.id"], name="fk_tool_effects_task", ondelete="RESTRICT"
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_tool_effects_task",
+            ondelete="RESTRICT",
         ),
         Index("ix_tool_effects_task_created", "task_id", "created_at"),
     )
@@ -413,7 +640,9 @@ class Draft(TimestampMixin, Base):
 
     __tablename__ = "drafts"
     __table_args__ = (
-        CheckConstraint("current_version >= 0", name="ck_drafts_current_version_nonnegative"),
+        CheckConstraint(
+            "current_version >= 0", name="ck_drafts_current_version_nonnegative"
+        ),
         CheckConstraint(
             "lock_state IN ('EDITABLE', 'SUBMITTING', 'SUBMITTED')",
             name="ck_drafts_lock_state",
@@ -426,7 +655,9 @@ class Draft(TimestampMixin, Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
-    current_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    current_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     lock_state: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="EDITABLE"
     )
@@ -438,15 +669,27 @@ class DraftRevision(Base):
     __tablename__ = "draft_revisions"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["draft_id"], ["drafts.id"], name="fk_draft_revisions_draft", ondelete="RESTRICT"
+            ["draft_id"],
+            ["drafts.id"],
+            name="fk_draft_revisions_draft",
+            ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["changed_by"], ["users.id"], name="fk_draft_revisions_changed_by", ondelete="RESTRICT"
+            ["changed_by"],
+            ["users.id"],
+            name="fk_draft_revisions_changed_by",
+            ondelete="RESTRICT",
         ),
         CheckConstraint("version > 0", name="ck_draft_revisions_version_positive"),
         CheckConstraint("currency = 'CNY'", name="ck_draft_revisions_currency_cny"),
-        CheckConstraint("total_amount IS NULL OR total_amount >= 0", name="ck_draft_revisions_total_nonnegative"),
-        CheckConstraint("order_type IS NULL OR order_type IN ('SALES', 'PURCHASE')", name="ck_draft_revisions_order_type"),
+        CheckConstraint(
+            "total_amount IS NULL OR total_amount >= 0",
+            name="ck_draft_revisions_total_nonnegative",
+        ),
+        CheckConstraint(
+            "order_type IS NULL OR order_type IN ('SALES', 'PURCHASE')",
+            name="ck_draft_revisions_order_type",
+        ),
         Index("ix_draft_revisions_changed_by", "changed_by"),
     )
 
@@ -466,7 +709,9 @@ class DraftRevision(Base):
     delivery_date: Mapped[date | None] = mapped_column(Date)
     address: Mapped[str | None] = mapped_column(Text)
     contact: Mapped[str | None] = mapped_column(Text)
-    business_fields: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    business_fields: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
     total_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
     content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     validation: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
@@ -487,9 +732,17 @@ class DraftItem(Base):
             name="fk_draft_items_revision",
             ondelete="RESTRICT",
         ),
-        CheckConstraint("quantity IS NULL OR quantity >= 0", name="ck_draft_items_quantity_nonnegative"),
-        CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_draft_items_unit_price_nonnegative"),
-        CheckConstraint("amount IS NULL OR amount >= 0", name="ck_draft_items_amount_nonnegative"),
+        CheckConstraint(
+            "quantity IS NULL OR quantity >= 0",
+            name="ck_draft_items_quantity_nonnegative",
+        ),
+        CheckConstraint(
+            "unit_price IS NULL OR unit_price >= 0",
+            name="ck_draft_items_unit_price_nonnegative",
+        ),
+        CheckConstraint(
+            "amount IS NULL OR amount >= 0", name="ck_draft_items_amount_nonnegative"
+        ),
         CheckConstraint("line_no > 0", name="ck_draft_items_line_no_positive"),
         Index("ix_draft_items_material_id", "material_id"),
     )
@@ -520,7 +773,10 @@ class FieldEvidence(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["confirmed_by"], ["users.id"], name="fk_field_evidence_confirmed_by", ondelete="RESTRICT"
+            ["confirmed_by"],
+            ["users.id"],
+            name="fk_field_evidence_confirmed_by",
+            ondelete="RESTRICT",
         ),
         Index("ix_field_evidence_draft_version", "draft_id", "version"),
         CheckConstraint(
@@ -557,7 +813,10 @@ class TraceSpan(Base):
             ["actor_id"], ["users.id"], name="fk_trace_spans_actor", ondelete="RESTRICT"
         ),
         ForeignKeyConstraint(
-            ["task_id"], ["agent_tasks.id"], name="fk_trace_spans_task", ondelete="RESTRICT"
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_trace_spans_task",
+            ondelete="RESTRICT",
         ),
         CheckConstraint("attempt > 0", name="ck_trace_spans_attempt_positive"),
         CheckConstraint(
@@ -602,7 +861,10 @@ class TaskEventCursor(Base):
     __table_args__ = (
         CheckConstraint("next_seq > 0", name="ck_task_event_cursors_next_seq_positive"),
         ForeignKeyConstraint(
-            ["task_id"], ["agent_tasks.id"], name="fk_task_event_cursors_task", ondelete="RESTRICT"
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_task_event_cursors_task",
+            ondelete="RESTRICT",
         ),
     )
 
@@ -624,7 +886,10 @@ class TaskEvent(Base):
             ondelete="SET NULL",
         ),
         ForeignKeyConstraint(
-            ["task_id"], ["agent_tasks.id"], name="fk_task_events_task", ondelete="RESTRICT"
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_task_events_task",
+            ondelete="RESTRICT",
         ),
         Index("ix_task_events_emitted_at", "emitted_at"),
     )
@@ -652,7 +917,10 @@ class AuditEvent(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["task_id"], ["agent_tasks.id"], name="fk_audit_events_task", ondelete="RESTRICT"
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_audit_events_task",
+            ondelete="RESTRICT",
         ),
         Index("ix_audit_events_task_created", "task_id", "created_at"),
         Index("ix_audit_events_actor_created", "actor_id", "created_at"),
@@ -671,12 +939,16 @@ class AuditEvent(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
+
 class Order(TimestampMixin, Base):
-    """正式订单基础头表；任务、批准和明细关系按对应 issue 增量添加。"""
+    """正式订单头；创建时绑定唯一任务、批准快照和幂等提交键。"""
 
     __tablename__ = "orders"
     __table_args__ = (
         UniqueConstraint("number", name="uq_orders_number"),
+        UniqueConstraint("task_id", name="uq_orders_task"),
+        UniqueConstraint("submit_key", name="uq_orders_submit_key"),
+        UniqueConstraint("approval_id", name="uq_orders_approval"),
         ForeignKeyConstraint(
             ["contract_id", "department_id"],
             ["contracts.id", "contracts.department_id"],
@@ -691,12 +963,142 @@ class Order(TimestampMixin, Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("agent_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    approval_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("task_approvals.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    submit_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    approved_content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     number: Mapped[str] = mapped_column(String(64), nullable=False)
     department_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
+        Uuid(as_uuid=True),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     contract_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     type: Mapped[str] = mapped_column(String(16), nullable=False)
     currency: Mapped[str] = mapped_column(CHAR(3), nullable=False, server_default="CNY")
     total_amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
-    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="CREATED")
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="CREATED"
+    )
+
+
+class OrderItem(Base):
+    """正式订单行保存批准时的不可变业务快照。"""
+
+    __tablename__ = "order_items"
+    __table_args__ = (
+        CheckConstraint("line_no > 0", name="ck_order_items_line_no_positive"),
+        CheckConstraint("quantity > 0", name="ck_order_items_quantity_positive"),
+        CheckConstraint("unit_price > 0", name="ck_order_items_unit_price_positive"),
+        CheckConstraint("amount >= 0", name="ck_order_items_amount_nonnegative"),
+        ForeignKeyConstraint(
+            ["order_id"],
+            ["orders.id"],
+            name="fk_order_items_order",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["contract_line_id"],
+            ["contract_lines.id"],
+            name="fk_order_items_contract_line",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["material_id"],
+            ["materials.id"],
+            name="fk_order_items_material",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    order_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    line_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_line_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    material_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    raw_name: Mapped[str | None] = mapped_column(Text)
+    specification: Mapped[str | None] = mapped_column(Text)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+
+
+class QuotaOccupation(Base):
+    """正式订单的唯一额度占用流水；与订单及余额聚合在同一事务提交。"""
+
+    __tablename__ = "quota_occupations"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_quota_occupations_order"),
+        UniqueConstraint(
+            "task_id", "submit_key", name="uq_quota_occupations_submit_key"
+        ),
+        UniqueConstraint("approval_id", name="uq_quota_occupations_approval"),
+        ForeignKeyConstraint(
+            ["order_id"],
+            ["orders.id"],
+            name="fk_quota_occupations_order",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_quota_occupations_task",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["approval_id"],
+            ["task_approvals.id"],
+            name="fk_quota_occupations_approval",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["contract_id"],
+            ["contracts.id"],
+            name="fk_quota_occupations_contract",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("amount >= 0", name="ck_quota_occupations_amount_nonnegative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    order_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    approval_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    contract_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    submit_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    quantities: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class OrderNumberCounter(Base):
+    """按订单方向、部门和业务日串行生成正式订单号。"""
+
+    __tablename__ = "order_number_counters"
+    __table_args__ = (
+        CheckConstraint(
+            "next_value > 0", name="ck_order_number_counters_next_positive"
+        ),
+        ForeignKeyConstraint(
+            ["department_id"],
+            ["departments.id"],
+            name="fk_order_number_counters_department",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    business_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    next_value: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")

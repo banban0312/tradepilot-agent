@@ -62,6 +62,24 @@ pwsh -File code/scripts/verify_issue_008.ps1
 
 验证包含持久数据库与 LangGraph 官方 PostgreSQL checkpointer 的真实集成，不需要模型凭据；该 issue 不接入在线模型或业务 MCP。随机 Compose 清理仅作用于本次项目。若 Docker 不可用，静态检查结果不能替代数据库集成结果。
 
+## Issue #14 任务 API 与 SSE 验证
+
+```powershell
+pwsh -File code/scripts/verify_issue_014.ps1
+```
+
+脚本要求 Docker Desktop Linux 容器引擎可用，以及已按上文建立的 `code/backend/.env`。脚本为 PostgreSQL、API 和 MCP 分配随机端口，创建随机 Compose 项目及数据卷；不会修改 `.env` 或触碰其他 Compose 项目。它执行数据库迁移和 `alembic check`，载入隔离演示账号后运行 #8、#13、#14 测试，覆盖任务创建/幂等/部门权限、等待点恢复、草稿版本冲突和编辑、事件序号与 SSE 重放/重同步。无需在线模型凭据；模型调用不属于本验收。完成或失败后只清理本轮随机 Compose 项目和数据卷，并恢复脚本设置的进程环境变量。
+
+Docker 首次构建需访问 Docker Hub 与 GHCR；依赖镜像已缓存时可离线复用。预期所有测试通过且脚本以 0 退出；失败时脚本输出本轮 API/PostgreSQL 日志并以非零退出。实际验证结果应记录在 PR，不把未运行或失败的在线模型评测描述为通过。
+
+如需额外验证从任务 API、持久 Worker、DeepSeek Function Calling 到真实 MCP 的完整在线流程，并已在 `code/backend/.env` 配置 DeepSeek 模型和密钥，可显式运行：
+
+```powershell
+pwsh -File code/scripts/verify_issue_014.ps1 -LiveModel
+```
+
+该模式会产生少量真实模型调用用量。它使用隔离 Compose 数据库、随机端口和临时演示密码，验证任务到达 `WAITING_APPROVAL`、模型与业务工具轨迹成功、写入草稿且正式订单数未增加；结束后只清理本轮隔离项目。脚本会在进程环境中生成一次性 MCP 上下文签名密钥并在退出时恢复，不修改 `.env`。模型密钥不会写入 Git 或输出到日志。在线模型结果与默认离线/真实服务集成测试分别记录。
+
 ## Issue #1 完整验证
 
 ```powershell
