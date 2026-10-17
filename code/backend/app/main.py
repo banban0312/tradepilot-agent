@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.artifacts.routes import router as artifacts_router
 from app.auth.origin import is_same_origin
 from app.auth.routes import router as auth_router
 from app.config import settings
@@ -29,6 +30,7 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(orders_router)
 app.include_router(tasks_router)
+app.include_router(artifacts_router)
 
 
 @app.exception_handler(HTTPException)
@@ -90,6 +92,37 @@ async def reject_cross_origin_writes(request: Request, call_next):
         request.state.request_id = str(uuid4())
 
     unsafe_method = request.method not in {"GET", "HEAD", "OPTIONS", "TRACE"}
+    if request.method == "POST" and request.url.path == "/api/v1/artifacts":
+        # multipart 包含字段头部；限制总请求体并在解析表单前拒绝明显超限请求。
+        raw_length = request.headers.get("content-length")
+        if raw_length is None or not raw_length.isdecimal():
+            return JSONResponse(
+                status_code=411,
+                content={
+                    "error": {
+                        "code": "INPUT_INVALID",
+                        "message": "附件上传需要有效的 Content-Length",
+                        "retryable": False,
+                        "details": {},
+                    },
+                    "request_id": request.state.request_id,
+                },
+                headers={"X-Request-ID": request.state.request_id},
+            )
+        if int(raw_length) > 20 * 1024 * 1024 + 64 * 1024:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": {
+                        "code": "FILE_TOO_LARGE",
+                        "message": "上传请求超过附件总大小限制",
+                        "retryable": False,
+                        "details": {},
+                    },
+                    "request_id": request.state.request_id,
+                },
+                headers={"X-Request-ID": request.state.request_id},
+            )
     if (
         request.url.path.startswith("/api/v1/")
         and unsafe_method
