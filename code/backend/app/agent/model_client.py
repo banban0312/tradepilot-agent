@@ -1,4 +1,4 @@
-"""OpenAI Responses API 适配器；不写日志、不保存服务端对话状态。"""
+"""OpenAI 格式 Responses API 适配器；不写日志、不保存服务端对话状态。"""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class ModelResponse:
 
 
 class OpenAIResponsesClient:
-    """通过 OpenAI Responses API 执行真实模型请求与 JSON Schema 工具选择。"""
+    """通过 OpenAI 格式 Responses API 执行模型请求与 JSON Schema 工具选择。"""
 
     def __init__(
         self,

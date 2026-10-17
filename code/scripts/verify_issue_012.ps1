@@ -32,7 +32,7 @@ foreach ($line in Get-Content -LiteralPath $envFile) {
     }
 }
 $onlineModelConfigured = (
-    $modelValues['MODEL_PROVIDER'] -eq 'openai' -and
+    $modelValues['MODEL_PROVIDER'] -in @('openai', 'deepseek') -and
     -not [string]::IsNullOrWhiteSpace($modelValues['MODEL_NAME']) -and
     -not [string]::IsNullOrWhiteSpace($modelValues['MODEL_API_KEY'])
 )

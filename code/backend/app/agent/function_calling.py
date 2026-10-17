@@ -268,7 +268,7 @@ class FunctionCallingRunner:
                 trace_id=trace_id,
                 name="model.function_calling",
                 kind="MODEL",
-                protocol="openai.responses",
+                protocol=f"{self.config.model_provider or 'unknown'}.responses",
                 attempt=1,
                 input_ref={
                     "provider": self.config.model_provider or "",
@@ -547,6 +547,10 @@ class FunctionCallingRunner:
             arguments = json.loads(raw_arguments, parse_constant=_reject_constant)
             if not isinstance(arguments, dict):
                 raise TypeError("工具参数必须是 JSON 对象")
+            if name == "save_order_draft":
+                if "task_id" in arguments:
+                    raise ValueError("task_id 由可信任务上下文提供")
+                arguments["task_id"] = str(task_id)
             schema = INPUT_SCHEMAS[name]
             validated = schema.model_validate_json(
                 json.dumps(arguments, ensure_ascii=False, allow_nan=False), strict=True
@@ -673,15 +677,15 @@ def _tool_value(tool: Any, field: str) -> Any:
 
 
 _MODEL_OMITTED_INPUT_FIELDS = frozenset(
-    {"business_fields", "locator", "raw_value", "accepted_value"}
+    {"task_id", "business_fields", "locator", "raw_value", "accepted_value"}
 )
 
 
 def _strict_model_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """将 MCP 契约投影为 Responses strict schema，MCP 仍执行完整本地校验。
 
-    开放字典/任意值字段不在 Structured Outputs 的可约束子集中，且这些
-    入参均为可选值；模型省略后由 MCP 输入模型使用既有默认值。
+    服务端任务 ID 和开放字典/任意值字段不会暴露给模型；任务 ID 在调用
+    save_order_draft 时由可信上下文注入，其余可选字段由 MCP 输入模型补默认值。
     """
     result = deepcopy(schema)
     # query_customer 以根级 anyOf 表示“name/code 至少填一项”。Responses
@@ -805,7 +809,11 @@ def _elapsed_ms(started: float) -> int:
 
 def create_configured_model_client(config: Settings = settings) -> ModelClient:
     """按非敏感 provider 配置创建模型 client；未配置时明确失败。"""
-    if config.model_provider != "openai":
+    provider_base_urls = {
+        "openai": "https://api.openai.com/v1",
+        "deepseek": "https://api.deepseek.com",
+    }
+    if config.model_provider not in provider_base_urls:
         raise FunctionCallingFailure(
             "MODEL_PROVIDER_UNSUPPORTED", "model.configuration"
         )
@@ -818,7 +826,7 @@ def create_configured_model_client(config: Settings = settings) -> ModelClient:
     return OpenAIResponsesClient(
         model=config.model_name,
         api_key=config.model_api_key,
-        base_url=config.model_base_url,
+        base_url=config.model_base_url or provider_base_urls[config.model_provider],
         timeout_seconds=config.model_timeout_seconds,
         max_retries=config.model_max_retries,
     )

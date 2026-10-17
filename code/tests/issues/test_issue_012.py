@@ -267,6 +267,7 @@ async def test_model_tool_choice_runs_mcp_and_returns_real_usage_shape() -> None
     assert "business_fields" not in str(draft_schema)
     assert "raw_value" not in str(draft_schema)
     assert "accepted_value" not in str(draft_schema)
+    assert "task_id" not in draft_schema["properties"]
     assert model.requests[0]["input_items"][0]["role"] == "user"
     assert "2026-10-16" in model.requests[0]["input_items"][0]["content"]
     assert "Asia/Hong_Kong" in model.requests[0]["input_items"][0]["content"]
@@ -283,6 +284,43 @@ async def test_model_tool_choice_runs_mcp_and_returns_real_usage_shape() -> None
     assert "found" in summary["data_fields"]
     assert "isolated-mcp-fixture" not in json.dumps(trace.finished, default=str)
     assert "建联公司" not in json.dumps(trace.started, ensure_ascii=False, default=str)
+
+
+@pytest.mark.asyncio
+async def test_save_draft_uses_trusted_task_id_instead_of_model_input() -> None:
+    model = ScriptedModel(
+        [
+            _tool_response(
+                "save_order_draft",
+                '{"expected_version":0,"candidate_order":{},"evidence_refs":[]}',
+            ),
+            _final_response(),
+        ]
+    )
+    mcp = ScriptedMCP()
+    trace = MemoryTraceSink()
+
+    await _runner(model, mcp, trace).run(**_call())
+
+    assert mcp.calls[0]["name"] == "save_order_draft"
+    assert mcp.calls[0]["arguments"]["task_id"] == str(TASK_ID)
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_override_server_task_id() -> None:
+    model = ScriptedModel(
+        [
+            _tool_response(
+                "save_order_draft",
+                '{"task_id":"00000000-0000-4000-8000-000000000999",'
+                '"expected_version":0,"candidate_order":{},"evidence_refs":[]}',
+            )
+        ]
+    )
+    with pytest.raises(FunctionCallingFailure) as error:
+        await _runner(model, ScriptedMCP(), MemoryTraceSink()).run(**_call())
+
+    assert error.value.code == "TOOL_INPUT_INVALID"
 
 
 @pytest.mark.asyncio
@@ -705,6 +743,35 @@ def test_missing_live_credentials_are_reported_as_unconfigured() -> None:
         create_configured_model_client(config)
 
     assert error.value.code == "MODEL_PROVIDER_UNSUPPORTED"
+
+
+def test_deepseek_provider_uses_its_responses_api_root() -> None:
+    config = Settings(
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost/db"),
+        model_provider="deepseek",
+        model_name="deepseek-flash",
+        model_api_key=SecretStr("test-key-not-real"),
+    )
+
+    client = create_configured_model_client(config)
+
+    assert isinstance(client, OpenAIResponsesClient)
+    assert client.base_url == "https://api.deepseek.com"
+
+
+def test_deepseek_provider_keeps_an_explicit_compatible_gateway() -> None:
+    config = Settings(
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost/db"),
+        model_provider="deepseek",
+        model_name="deepseek-flash",
+        model_api_key=SecretStr("test-key-not-real"),
+        model_base_url="https://model-gateway.example/v1",
+    )
+
+    client = create_configured_model_client(config)
+
+    assert isinstance(client, OpenAIResponsesClient)
+    assert client.base_url == "https://model-gateway.example/v1"
 
 
 @pytest.mark.asyncio
