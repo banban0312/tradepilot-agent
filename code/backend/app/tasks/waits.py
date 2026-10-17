@@ -28,7 +28,14 @@ async def project_wait(
         raise ValueError("等待点缺少 checkpoint 或 interrupt 标识")
     if kind not in {"input", "review"}:
         raise ValueError("等待点类型无效")
-    wait_state = "WAITING_INPUT" if kind == "input" else "WAITING_APPROVAL"
+    requested_state = details.get("projection_state")
+    wait_state = (
+        "BLOCKED_RULE"
+        if kind == "input" and requested_state == "BLOCKED_RULE"
+        else "WAITING_INPUT"
+        if kind == "input"
+        else "WAITING_APPROVAL"
+    )
     async with lease.write_session() as session:
         active = await session.scalar(
             select(TaskWait)
@@ -218,7 +225,14 @@ async def complete_resume_projection(
                         active=True,
                     )
                 )
-            task.state = "WAITING_INPUT" if next_kind == "input" else "WAITING_APPROVAL"
+            next_state = next_wait.get("projection_state")
+            task.state = (
+                "BLOCKED_RULE"
+                if next_kind == "input" and next_state == "BLOCKED_RULE"
+                else "WAITING_INPUT"
+                if next_kind == "input"
+                else "WAITING_APPROVAL"
+            )
             task.checkpoint_ref = next_checkpoint
             task.current_step = (
                 "await_input" if next_kind == "input" else "await_review"
@@ -240,6 +254,8 @@ async def complete_resume_projection(
             task.checkpoint_ref = str(result.get("checkpoint_ref") or checkpoint_ref)
             task.current_step = {
                 "SUBMITTING": "commit_order",
+                "COMPLETED": "completed",
+                "BLOCKED_RULE": "prepare_input_wait",
                 "REJECTED": "rejected",
             }.get(task.state, "await_review")
         task.projection_version += 1

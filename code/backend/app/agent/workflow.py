@@ -42,6 +42,9 @@ class WorkflowState(TypedDict, total=False):
     resume_command: dict[str, Any]
     review_decision: str
     review_comment: str
+    block_reason: str
+    order_id: str
+    order_number: str
     projection_state: str
 
 
@@ -63,6 +66,8 @@ class WorkflowServices(Protocol):
     async def load_review_command(
         self, command_id: UUID, *, state: WorkflowState
     ) -> Mapping[str, Any]: ...
+
+    async def commit_order(self, state: WorkflowState) -> Mapping[str, Any]: ...
 
 
 class WorkflowResumeConflict(ValueError):
@@ -105,6 +110,7 @@ def build_task_graph(
                 "command_kind": "INPUT",
                 "resume_command": {},
                 "missing_fields": [],
+                "block_reason": "",
                 "projection_state": "RUNNING",
                 "review_decision": "",
             }
@@ -167,7 +173,8 @@ def build_task_graph(
 
     async def prepare_input_wait(state: WorkflowState) -> WorkflowState:
         returning = state.get("review_decision") == "RETURN"
-        if not state.get("missing_fields") and not returning:
+        blocked = bool(state.get("block_reason"))
+        if not state.get("missing_fields") and not returning and not blocked:
             raise ValueError("不能为完整草稿创建输入等待点")
         return {
             "wait_context": {
@@ -179,12 +186,15 @@ def build_task_graph(
                 "content_hash": state.get("content_hash"),
                 "missing_fields": state["missing_fields"],
                 "reason": (
-                    state.get("review_comment") or "审批人退回修改"
+                    state.get("block_reason")
+                    or state.get("review_comment")
+                    or "审批人退回修改"
                     if returning
-                    else "待补充必填信息"
+                    else state.get("block_reason") or "待补充必填信息"
                 ),
+                "projection_state": "BLOCKED_RULE" if blocked else "WAITING_INPUT",
             },
-            "projection_state": "WAITING_INPUT",
+            "projection_state": "BLOCKED_RULE" if blocked else "WAITING_INPUT",
         }
 
     async def await_input(state: WorkflowState) -> WorkflowState:
@@ -208,14 +218,21 @@ def build_task_graph(
             "draft_version": int(persisted["draft_version"]),
             "content_hash": str(persisted.get("content_hash") or ""),
             "missing_fields": list(persisted.get("issues", [])),
-            "projection_state": "WAITING_APPROVAL" if persisted.get("reviewable") else "WAITING_INPUT",
+            "projection_state": "WAITING_APPROVAL"
+            if persisted.get("reviewable")
+            else "WAITING_INPUT",
         }
 
     async def prepare_review(state: WorkflowState) -> WorkflowState:
         draft_id = state.get("draft_id")
         version = state.get("draft_version")
         digest = state.get("content_hash")
-        if not isinstance(draft_id, str) or not isinstance(version, int) or not isinstance(digest, str) or len(digest) != 64:
+        if (
+            not isinstance(draft_id, str)
+            or not isinstance(version, int)
+            or not isinstance(digest, str)
+            or len(digest) != 64
+        ):
             raise WorkflowResumeConflict("审批等待点缺少当前草稿版本或内容摘要")
         return {
             "wait_context": {
@@ -231,9 +248,13 @@ def build_task_graph(
 
     async def await_review(state: WorkflowState) -> WorkflowState:
         command_ref = interrupt(state["wait_context"])
-        if not isinstance(command_ref, Mapping) or not isinstance(command_ref.get("command_id"), str):
+        if not isinstance(command_ref, Mapping) or not isinstance(
+            command_ref.get("command_id"), str
+        ):
             raise WorkflowResumeConflict("审批恢复载荷缺少命令 ID")
-        command = await services.load_review_command(UUID(command_ref["command_id"]), state=state)
+        command = await services.load_review_command(
+            UUID(command_ref["command_id"]), state=state
+        )
         decision = command.get("decision")
         if decision not in {"APPROVE", "RETURN", "REJECT", "EDIT"}:
             raise WorkflowResumeConflict("审批恢复命令决定无效")
@@ -248,8 +269,23 @@ def build_task_graph(
     async def finish_approval(state: WorkflowState) -> WorkflowState:
         if state.get("review_decision") != "APPROVE":
             raise WorkflowResumeConflict("当前任务没有有效批准")
-        # M3-01 leaves execution at the Spec's SUBMITTING boundary; M3-02 owns order commit.
-        return {"projection_state": "SUBMITTING"}
+        result = await services.commit_order(state)
+        if result.get("state") == "BLOCKED_RULE":
+            reason = str(
+                result.get("reason") or "合同或额度规则已变化，请修改草稿后重新审批"
+            )
+            return {
+                "projection_state": "BLOCKED_RULE",
+                "block_reason": reason,
+                "missing_fields": [{"field": "contract_rules", "message": reason}],
+            }
+        if result.get("state") != "COMPLETED":
+            raise WorkflowResumeConflict("订单提交未返回可识别的结果")
+        return {
+            "projection_state": "COMPLETED",
+            "order_id": str(result.get("order_id") or ""),
+            "order_number": str(result.get("order_number") or ""),
+        }
 
     async def reject_task(state: WorkflowState) -> WorkflowState:
         if state.get("review_decision") != "REJECT":
@@ -288,8 +324,15 @@ def build_task_graph(
     builder.add_edge("await_input", "ingest")
     builder.add_conditional_edges(
         "persist_draft",
-        lambda state: "prepare_review" if state.get("projection_state") == "WAITING_APPROVAL" else "prepare_input_wait",
-        {"prepare_review": "prepare_review", "prepare_input_wait": "prepare_input_wait"},
+        lambda state: (
+            "prepare_review"
+            if state.get("projection_state") == "WAITING_APPROVAL"
+            else "prepare_input_wait"
+        ),
+        {
+            "prepare_review": "prepare_review",
+            "prepare_input_wait": "prepare_input_wait",
+        },
     )
     builder.add_edge("prepare_review", "await_review")
     builder.add_conditional_edges(
@@ -300,9 +343,22 @@ def build_task_graph(
             "REJECT": "reject_task",
             "EDIT": "ingest",
         }.get(state.get("review_decision"), "reject_task"),
-        {"finish_approval": "finish_approval", "prepare_input_wait": "prepare_input_wait", "reject_task": "reject_task", "ingest": "ingest"},
+        {
+            "finish_approval": "finish_approval",
+            "prepare_input_wait": "prepare_input_wait",
+            "reject_task": "reject_task",
+            "ingest": "ingest",
+        },
     )
-    builder.add_edge("finish_approval", END)
+    builder.add_conditional_edges(
+        "finish_approval",
+        lambda state: (
+            "prepare_input_wait"
+            if state.get("projection_state") == "BLOCKED_RULE"
+            else END
+        ),
+        {"prepare_input_wait": "prepare_input_wait", END: END},
+    )
     builder.add_edge("reject_task", END)
     return builder.compile(checkpointer=checkpointer)
 
@@ -336,6 +392,7 @@ def wait_details(snapshot: Any) -> dict[str, Any] | None:
         "content_hash": payload.get("content_hash"),
         "missing_fields": payload.get("missing_fields", []),
         "reason": payload.get("reason"),
+        "projection_state": payload.get("projection_state"),
         "state_graph_version": values.get("graph_version"),
     }
 
