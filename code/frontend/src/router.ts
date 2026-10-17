@@ -1,10 +1,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import AppShell from './views/AppShell.vue'
-import HomeView from './views/HomeView.vue'
 import InterfaceStatesView from './views/InterfaceStatesView.vue'
 import LoginView from './views/LoginView.vue'
 import MasterDataView from './views/MasterDataView.vue'
+import TaskWorkbenchView from './views/TaskWorkbenchView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -14,7 +14,8 @@ export const router = createRouter({
       path: '/',
       component: AppShell,
       children: [
-        { path: '', name: 'workbench', component: HomeView },
+        { path: '', name: 'workbench', component: TaskWorkbenchView },
+        { path: 'tasks/:taskId', name: 'task-workbench', component: TaskWorkbenchView },
         { path: 'admin/master-data', name: 'master-data', component: MasterDataView, meta: { requiresSystemAdmin: true } },
         { path: 'interface-states', name: 'interface-states', component: InterfaceStatesView },
       ],

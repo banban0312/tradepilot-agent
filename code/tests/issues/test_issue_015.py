@@ -571,6 +571,11 @@ async def test_pending_approval_is_invalidated_and_replaced_by_draft_edit() -> N
     ):
         operator = await _login(operator_client, "demo-operator-north")
         approver = await _login(approver_client, "demo-approver-north")
+        queued_detail = await operator_client.get(
+            f"/api/v1/tasks/{wait_data['task_id']}"
+        )
+        assert queued_detail.status_code == 200, queued_detail.text
+        assert "EDIT_DRAFT" in queued_detail.json()["data"]["available_actions"]
         updated = await operator_client.patch(
             f"/api/v1/tasks/{wait_data['task_id']}/draft",
             headers=_headers(operator, f"edit-after-approval-{uuid4()}"),

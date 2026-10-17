@@ -88,6 +88,14 @@ pwsh -NoProfile -File code/scripts/verify_issue_017.ps1
 
 该脚本会启动独立的数据库、API 和前端代理服务，覆盖任务失败定位、不可重试规则阻断、版本冲突、幂等重试，以及已提交订单但响应未知时回放原订单且不重复占额。脚本依赖 Docker 和本地 `code/backend/.env`，只清理自己创建的随机 Compose 项目。实现说明与验证细节见 [`M3-03-RECOVERY.md`](M3-03-RECOVERY.md)。
 
+## Issue #18 全屏工作台与草稿交互
+
+```powershell
+pwsh -File code/scripts/verify_issue_018.ps1
+```
+
+该脚本在随机 Compose 项目中构建前后端、启动隔离 PostgreSQL/API/Web、执行迁移与漂移检查，并运行任务事件、审批、安全恢复及工作台额度回归。Issue #18 用例验证草稿快照、合同额度摘要、跨部门合同额度保密，以及经真实 API 提交的草稿版本更新与金额重算。任务数据位于脚本创建的临时数据库，结束时只清理该随机项目和卷；不会修改本机 `.env` 或运行在线模型。详细范围和界面行为见 [`M3-04-WORKBENCH.md`](M3-04-WORKBENCH.md)。
+
 ## Issue #1 完整验证
 
 ```powershell
