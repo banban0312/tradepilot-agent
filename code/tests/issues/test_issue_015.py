@@ -43,7 +43,8 @@ from app.tasks.waits import bind_wait_command
 _NORTH_USER = UUID("00000000-0000-4000-8000-000000000100")
 _NORTH_APPROVER = UUID("00000000-0000-4000-8000-000000000102")
 _NORTH_DEPT = UUID("00000000-0000-4000-8000-000000000001")
-_ORIGIN = os.environ.get("APP_ORIGIN") or "http://api:8000"
+_ORIGIN = os.environ.get("APP_ORIGIN") or "http://localhost:5173"
+_API_BASE_URL = os.environ.get("TRADEPILOT_TEST_API_URL") or "http://api:8000"
 _HASH = hashlib.sha256(b"issue-015-draft").hexdigest()
 
 
@@ -390,8 +391,8 @@ async def test_review_api_binds_identity_version_and_idempotent_command() -> Non
     async with async_session_factory() as session, session.begin():
         session.add(UserRole(user_id=_NORTH_USER, role=BUSINESS_APPROVER))
     async with (
-        httpx.AsyncClient(base_url=_ORIGIN, timeout=15) as owner_client,
-        httpx.AsyncClient(base_url=_ORIGIN, timeout=15) as approver_client,
+        httpx.AsyncClient(base_url=_API_BASE_URL, timeout=15) as owner_client,
+        httpx.AsyncClient(base_url=_API_BASE_URL, timeout=15) as approver_client,
     ):
         owner = await _login(owner_client, "demo-operator-north")
         approver = await _login(approver_client, "demo-approver-north")
@@ -487,7 +488,7 @@ async def test_review_api_persists_return_and_reject_decisions(
     async with async_session_factory() as session, session.begin():
         session.add(UserRole(user_id=_NORTH_USER, role=BUSINESS_APPROVER))
     try:
-        async with httpx.AsyncClient(base_url=_ORIGIN, timeout=15) as client:
+        async with httpx.AsyncClient(base_url=_API_BASE_URL, timeout=15) as client:
             approver = await _login(client, "demo-approver-north")
             response = await client.post(
                 f"/api/v1/tasks/{wait['task_id']}/review",
@@ -565,8 +566,8 @@ async def test_pending_approval_is_invalidated_and_replaced_by_draft_edit() -> N
         )
 
     async with (
-        httpx.AsyncClient(base_url=_ORIGIN, timeout=15) as operator_client,
-        httpx.AsyncClient(base_url=_ORIGIN, timeout=15) as approver_client,
+        httpx.AsyncClient(base_url=_API_BASE_URL, timeout=15) as operator_client,
+        httpx.AsyncClient(base_url=_API_BASE_URL, timeout=15) as approver_client,
     ):
         operator = await _login(operator_client, "demo-operator-north")
         approver = await _login(approver_client, "demo-approver-north")
@@ -645,7 +646,7 @@ async def test_missing_fields_and_over_quota_drafts_cannot_be_approved(
     quantity: Decimal, missing: bool
 ) -> None:
     wait = await _create_review_wait(quantity=quantity, missing=missing)
-    async with httpx.AsyncClient(base_url=_ORIGIN, timeout=15) as client:
+    async with httpx.AsyncClient(base_url=_API_BASE_URL, timeout=15) as client:
         approver = await _login(client, "demo-approver-north")
         blocked = await client.post(
             f"/api/v1/tasks/{wait['task_id']}/review",

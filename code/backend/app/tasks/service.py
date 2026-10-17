@@ -33,7 +33,10 @@ class TaskLockUnavailable(RuntimeError):
 
 
 def _payload_hash(
-    *, kind: str, payload: dict[str, object], expected_version: int | None,
+    *,
+    kind: str,
+    payload: dict[str, object],
+    expected_version: int | None,
     target_interrupt_id: str | None,
 ) -> str:
     semantic_request = {
@@ -42,7 +45,9 @@ def _payload_hash(
         "expected_version": expected_version,
         "target_interrupt_id": target_interrupt_id,
     }
-    canonical = json.dumps(semantic_request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        semantic_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -52,6 +57,32 @@ class EnqueuedCommand:
     command_id: UUID
     job_id: UUID
     replayed: bool
+
+
+async def command_job(session: AsyncSession, command: TaskCommand) -> TaskJob | None:
+    """读取命令对应作业；恢复命令保留原作业 ID，即使后续恢复再次复用作业。"""
+    job = await session.scalar(
+        select(TaskJob).where(
+            TaskJob.command_id == command.id, TaskJob.kind == JOB_KIND_RUN_TASK
+        )
+    )
+    if job is not None or command.kind != "RETRY":
+        return job
+    result = command.result_ref if isinstance(command.result_ref, dict) else {}
+    job_id = result.get("job_id")
+    if not isinstance(job_id, str):
+        return None
+    try:
+        parsed_job_id = UUID(job_id)
+    except ValueError:
+        return None
+    return await session.scalar(
+        select(TaskJob).where(
+            TaskJob.id == parsed_job_id,
+            TaskJob.task_id == command.task_id,
+            TaskJob.kind == JOB_KIND_RUN_TASK,
+        )
+    )
 
 
 async def create_task(
@@ -102,6 +133,7 @@ async def enqueue_command(
     request_id: str,
     expected_version: int | None = None,
     target_interrupt_id: str | None = None,
+    reuse_job_id: UUID | None = None,
 ) -> EnqueuedCommand:
     """在一个事务内写命令与作业；request_id 重放不会创建第二项副作用。"""
     if not request_id.strip() or len(request_id) > 128:
@@ -112,7 +144,9 @@ async def enqueue_command(
     if task is None:
         raise LookupError("任务不存在")
     digest = _payload_hash(
-        kind=kind, payload=payload, expected_version=expected_version,
+        kind=kind,
+        payload=payload,
+        expected_version=expected_version,
         target_interrupt_id=target_interrupt_id,
     )
     existing = await session.scalar(
@@ -123,25 +157,57 @@ async def enqueue_command(
     if existing is not None:
         if existing.payload_hash != digest:
             raise IdempotencyConflict("request_id 已用于不同命令")
-        job = await session.scalar(
-            select(TaskJob).where(
-                TaskJob.command_id == existing.id, TaskJob.kind == JOB_KIND_RUN_TASK
-            )
-        )
+        job = await command_job(session, existing)
         if job is None:
             raise RuntimeError("已保存命令缺少对应作业")
         return EnqueuedCommand(task_id, existing.id, job.id, True)
 
     command = TaskCommand(
-        id=uuid4(), task_id=task_id, actor_id=actor_id, kind=kind, payload=payload,
-        expected_version=expected_version, target_interrupt_id=target_interrupt_id,
-        request_id=request_id, payload_hash=digest,
+        id=uuid4(),
+        task_id=task_id,
+        actor_id=actor_id,
+        kind=kind,
+        payload=payload,
+        expected_version=expected_version,
+        target_interrupt_id=target_interrupt_id,
+        request_id=request_id,
+        payload_hash=digest,
     )
-    job = TaskJob(
-        id=uuid4(), task_id=task_id, command_id=command.id, kind=JOB_KIND_RUN_TASK,
-        state="READY", attempts=0, available_at=datetime.now(UTC),
-    )
-    session.add_all((command, job))
+    session.add(command)
+    if reuse_job_id is None:
+        job = TaskJob(
+            id=uuid4(),
+            task_id=task_id,
+            command_id=command.id,
+            kind=JOB_KIND_RUN_TASK,
+            state="READY",
+            attempts=0,
+            available_at=datetime.now(UTC),
+        )
+        session.add(job)
+    else:
+        job = await session.scalar(
+            select(TaskJob)
+            .where(
+                TaskJob.id == reuse_job_id,
+                TaskJob.task_id == task_id,
+                TaskJob.kind == JOB_KIND_RUN_TASK,
+                TaskJob.state == "FAILED",
+            )
+            .with_for_update()
+        )
+        if job is None:
+            raise ValueError("只有已失败的原作业可以安全重试")
+        # 保留原 job ID，Function Calling 由它派生的 MCP operation_id 才能继续幂等。
+        job.command_id = command.id
+        job.state = "READY"
+        job.available_at = datetime.now(UTC)
+        job.worker_id = None
+        job.heartbeat_at = None
+        job.execution_epoch = None
+    if kind == "RETRY":
+        # 固定这条幂等命令的作业身份；后续恢复可重用 job.command_id。
+        command.result_ref = {"job_id": str(job.id)}
     if task.state not in {"COMPLETED", "REJECTED"}:
         task.state = "QUEUED"
         task.projection_version += 1
@@ -151,9 +217,14 @@ async def enqueue_command(
 
 async def count_active_tasks(session: AsyncSession) -> int:
     """统计全局执行中任务；调用方领取时锁任务并重复检查。"""
-    return int(await session.scalar(
-        select(func.count()).select_from(AgentTask).where(AgentTask.state == "RUNNING")
-    ) or 0)
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(AgentTask)
+            .where(AgentTask.state == "RUNNING")
+        )
+        or 0
+    )
 
 
 async def try_claim_job(
@@ -164,9 +235,14 @@ async def try_claim_job(
         return None
     # 全局短事务锁避免两个 Worker 同时看到 4 个活跃任务并各自领取第 5 个。
     await session.execute(text("SELECT pg_advisory_xact_lock(74192831)"))
-    active = int(await session.scalar(
-        select(func.count(func.distinct(TaskJob.task_id))).where(TaskJob.state == "RUNNING")
-    ) or 0)
+    active = int(
+        await session.scalar(
+            select(func.count(func.distinct(TaskJob.task_id))).where(
+                TaskJob.state == "RUNNING"
+            )
+        )
+        or 0
+    )
     if active >= MAX_ACTIVE_TASKS:
         return None
     job = await session.scalar(
@@ -208,28 +284,35 @@ class TaskExecutionLease:
     job_id: UUID
     worker_id: str
     epoch: int
+    attempt_started_at: datetime
 
     @classmethod
     async def acquire(
         cls, connection: AsyncConnection, *, task_id: UUID, job_id: UUID, worker_id: str
     ) -> TaskExecutionLease:
-        acquired = bool(await connection.scalar(
-            text("SELECT pg_try_advisory_lock(hashtextextended(CAST(:task_id AS text), 0))"),
-            {"task_id": str(task_id)},
-        ))
+        acquired = bool(
+            await connection.scalar(
+                text(
+                    "SELECT pg_try_advisory_lock(hashtextextended(CAST(:task_id AS text), 0))"
+                ),
+                {"task_id": str(task_id)},
+            )
+        )
         await connection.commit()
         if not acquired:
             raise TaskLockUnavailable("同一任务已有执行者")
         try:
             async with connection.begin():
-                row = (await connection.execute(
-                    text("""UPDATE agent_tasks SET execution_epoch = execution_epoch + 1,
+                row = (
+                    await connection.execute(
+                        text("""UPDATE agent_tasks SET execution_epoch = execution_epoch + 1,
                               state = 'RUNNING', projection_version = projection_version + 1,
                               updated_at = now()
                            WHERE id = :task_id
-                           RETURNING execution_epoch, projection_version"""),
-                    {"task_id": task_id},
-                )).first()
+                           RETURNING execution_epoch, projection_version, now()"""),
+                        {"task_id": task_id},
+                    )
+                ).first()
                 if row is None:
                     raise LookupError("任务不存在")
                 epoch = int(row[0])
@@ -237,8 +320,12 @@ class TaskExecutionLease:
                     text("""UPDATE jobs SET execution_epoch = :epoch, heartbeat_at = now()
                            WHERE id = :job_id AND task_id = :task_id
                              AND state = 'RUNNING' AND worker_id = :worker_id"""),
-                    {"epoch": epoch, "job_id": job_id, "task_id": task_id,
-                     "worker_id": worker_id},
+                    {
+                        "epoch": epoch,
+                        "job_id": job_id,
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                    },
                 )
                 if result.rowcount != 1:
                     raise StaleExecutionEpoch("作业领取已失效")
@@ -248,10 +335,12 @@ class TaskExecutionLease:
                     event_type="task.status_changed",
                     payload={"state": "RUNNING", "projection_version": int(row[1])},
                 )
-            return cls(connection, task_id, job_id, worker_id, epoch)
+            return cls(connection, task_id, job_id, worker_id, epoch, row[2])
         except BaseException:
             await connection.execute(
-                text("SELECT pg_advisory_unlock(hashtextextended(CAST(:task_id AS text), 0))"),
+                text(
+                    "SELECT pg_advisory_unlock(hashtextextended(CAST(:task_id AS text), 0))"
+                ),
                 {"task_id": str(task_id)},
             )
             await connection.commit()
@@ -261,7 +350,9 @@ class TaskExecutionLease:
         """在每次业务写入事务内锁定任务行，拒绝旧 epoch。"""
         target = connection or self.connection
         value = await target.scalar(
-            text("SELECT execution_epoch FROM agent_tasks WHERE id=:task_id FOR UPDATE"),
+            text(
+                "SELECT execution_epoch FROM agent_tasks WHERE id=:task_id FOR UPDATE"
+            ),
             {"task_id": self.task_id},
         )
         if value != self.epoch:
@@ -280,7 +371,8 @@ class TaskExecutionLease:
         async with self.connection.begin():
             await self.assert_current()
             session = AsyncSession(
-                bind=self.connection, expire_on_commit=False,
+                bind=self.connection,
+                expire_on_commit=False,
                 join_transaction_mode="create_savepoint",
             )
             try:
@@ -294,12 +386,17 @@ class TaskExecutionLease:
 
     async def heartbeat(self, connection: AsyncConnection | None = None) -> None:
         """使用独立短连接续租，避免与图/checkpointer 并发操作专属锁连接。"""
+
         async def update_heartbeat(target: AsyncConnection) -> None:
             result = await target.execute(
                 text("""UPDATE jobs SET heartbeat_at=now()
                        WHERE id=:job_id AND worker_id=:worker_id AND execution_epoch=:epoch
                          AND state='RUNNING'"""),
-                {"job_id": self.job_id, "worker_id": self.worker_id, "epoch": self.epoch},
+                {
+                    "job_id": self.job_id,
+                    "worker_id": self.worker_id,
+                    "epoch": self.epoch,
+                },
             )
             if result.rowcount != 1:
                 raise StaleExecutionEpoch("作业租约已被撤销")
@@ -321,8 +418,15 @@ class TaskExecutionLease:
     ) -> None:
         """按 epoch 更新投影；仅接受已定义任务状态。"""
         allowed = {
-            "QUEUED", "RUNNING", "WAITING_INPUT", "WAITING_APPROVAL", "SUBMITTING", "BLOCKED_RULE",
-            "FAILED", "COMPLETED", "REJECTED",
+            "QUEUED",
+            "RUNNING",
+            "WAITING_INPUT",
+            "WAITING_APPROVAL",
+            "SUBMITTING",
+            "BLOCKED_RULE",
+            "FAILED",
+            "COMPLETED",
+            "REJECTED",
         }
         if state not in allowed:
             raise ValueError("任务状态无效")
@@ -334,9 +438,13 @@ class TaskExecutionLease:
                           projection_version=projection_version+1, updated_at=now()
                        WHERE id=:task_id AND execution_epoch=:epoch
                        RETURNING projection_version"""),
-                {"state": state, "checkpoint_ref": checkpoint_ref,
-                 "current_step": current_step, "task_id": self.task_id,
-                 "epoch": self.epoch},
+                {
+                    "state": state,
+                    "checkpoint_ref": checkpoint_ref,
+                    "current_step": current_step,
+                    "task_id": self.task_id,
+                    "epoch": self.epoch,
+                },
             )
             if result.rowcount != 1:
                 raise StaleExecutionEpoch("任务状态投影已失效")
@@ -364,15 +472,28 @@ class TaskExecutionLease:
                     text("""UPDATE jobs SET state='DONE', heartbeat_at=now()
                            WHERE id=:job_id AND task_id=:task_id AND worker_id=:worker_id
                              AND execution_epoch=:epoch AND state='RUNNING'"""),
-                    {"job_id": self.job_id, "task_id": self.task_id,
-                     "worker_id": self.worker_id, "epoch": self.epoch},
+                    {
+                        "job_id": self.job_id,
+                        "task_id": self.task_id,
+                        "worker_id": self.worker_id,
+                        "epoch": self.epoch,
+                    },
                 )
                 if result.rowcount != 1:
                     raise StaleExecutionEpoch("作业完成投影已失效")
                 await connection.execute(
-                    text("UPDATE task_commands SET state='APPLIED' WHERE id=(SELECT command_id FROM jobs WHERE id=:job_id) AND state='READY'"),
+                    text(
+                        "UPDATE task_commands SET state='APPLIED' WHERE id=(SELECT command_id FROM jobs WHERE id=:job_id) AND state='READY'"
+                    ),
                     {"job_id": self.job_id},
                 )
+                if task_state != "FAILED":
+                    await connection.execute(
+                        text(
+                            "UPDATE agent_tasks SET last_error=NULL WHERE id=:task_id"
+                        ),
+                        {"task_id": self.task_id},
+                    )
                 if task_state == "FAILED":
                     await append_task_event_on_connection(
                         connection,
@@ -381,12 +502,114 @@ class TaskExecutionLease:
                         payload={"error": task_error or {}},
                     )
             else:
+                safe_error = dict(error)
+                failure_span = (
+                    await connection.execute(
+                        text("""SELECT id, name, kind, status, error
+                               FROM trace_spans
+                               WHERE task_id=:task_id
+                                 AND status IN ('ERROR', 'INTERRUPTED', 'RUNNING')
+                                 AND start_at >= :attempt_started_at
+                               ORDER BY start_at DESC, id DESC
+                               LIMIT 1 FOR UPDATE"""),
+                        {
+                            "task_id": self.task_id,
+                            "attempt_started_at": self.attempt_started_at,
+                        },
+                    )
+                ).first()
+                if failure_span is None:
+                    synthetic_span_id = uuid4()
+                    synthetic_trace_id = uuid4()
+                    synthetic_name = str(safe_error.get("stage") or "worker.execution")
+                    synthetic_error = {
+                        "code": str(
+                            safe_error.get("code") or "WORKER_EXECUTION_FAILED"
+                        ),
+                        "retryable": bool(safe_error.get("retryable", False)),
+                    }
+                    await connection.execute(
+                        text("""INSERT INTO trace_spans
+                               (id, trace_id, task_id, kind, name, execution_mode, protocol,
+                                attempt, start_at, end_at, duration_ms, status, error)
+                               VALUES (:id, :trace_id, :task_id, 'WORKER', :name, 'LIVE',
+                                       'internal', 1, now(), now(), 0, 'ERROR', CAST(:error AS jsonb))"""),
+                        {
+                            "id": synthetic_span_id,
+                            "trace_id": synthetic_trace_id,
+                            "task_id": self.task_id,
+                            "name": synthetic_name,
+                            "error": json.dumps(synthetic_error),
+                        },
+                    )
+                    await append_task_event_on_connection(
+                        connection,
+                        task_id=self.task_id,
+                        event_type="span.failed",
+                        span_id=synthetic_span_id,
+                        payload={
+                            "span_id": str(synthetic_span_id),
+                            "status": "ERROR",
+                            "duration_ms": 0,
+                            "error": synthetic_error,
+                        },
+                    )
+                    failure_span = (
+                        synthetic_span_id,
+                        synthetic_name,
+                        "WORKER",
+                        "ERROR",
+                        synthetic_error,
+                    )
+                if failure_span is not None:
+                    span_id, span_name, span_kind, span_status, span_error = (
+                        failure_span
+                    )
+                    span_status = str(span_status)
+                    span_error = span_error if isinstance(span_error, dict) else {}
+                    if span_status == "RUNNING":
+                        span_error = {
+                            "code": str(
+                                safe_error.get("code") or "EXECUTION_INTERRUPTED"
+                            ),
+                            "retryable": bool(safe_error.get("retryable", False)),
+                        }
+                        await connection.execute(
+                            text("""UPDATE trace_spans
+                                   SET status='INTERRUPTED', end_at=now(), error=CAST(:error AS jsonb)
+                                   WHERE id=:span_id AND status='RUNNING'"""),
+                            {
+                                "span_id": span_id,
+                                "error": json.dumps(span_error),
+                            },
+                        )
+                        span_status = "INTERRUPTED"
+                    retryable = bool(safe_error.get("retryable"))
+                    if (
+                        span_status == "INTERRUPTED"
+                        and span_error.get("code") == "EXECUTION_INTERRUPTED"
+                    ):
+                        retryable = True
+                    safe_error["retryable"] = retryable
+                    safe_error["failed_span_id"] = str(span_id)
+                    safe_error["failure"] = {
+                        "span_id": str(span_id),
+                        "name": str(span_name),
+                        "kind": str(span_kind),
+                        "status": span_status,
+                        "code": span_error.get("code") or safe_error.get("code"),
+                        "retryable": retryable,
+                    }
                 result = await connection.execute(
                     text("""UPDATE jobs SET state='FAILED', heartbeat_at=now()
                            WHERE id=:job_id AND task_id=:task_id AND worker_id=:worker_id
                              AND execution_epoch=:epoch AND state='RUNNING'"""),
-                    {"job_id": self.job_id, "task_id": self.task_id,
-                     "worker_id": self.worker_id, "epoch": self.epoch},
+                    {
+                        "job_id": self.job_id,
+                        "task_id": self.task_id,
+                        "worker_id": self.worker_id,
+                        "epoch": self.epoch,
+                    },
                 )
                 if result.rowcount != 1:
                     raise StaleExecutionEpoch("失败作业投影已失效")
@@ -395,11 +618,16 @@ class TaskExecutionLease:
                               projection_version=projection_version+1, updated_at=now()
                            WHERE id=:task_id AND execution_epoch=:epoch
                            RETURNING projection_version"""),
-                    {"task_id": self.task_id, "epoch": self.epoch,
-                     "error": json.dumps(error, ensure_ascii=False)},
+                    {
+                        "task_id": self.task_id,
+                        "epoch": self.epoch,
+                        "error": json.dumps(safe_error, ensure_ascii=False),
+                    },
                 )
                 await connection.execute(
-                    text("UPDATE task_commands SET state='REJECTED' WHERE id=(SELECT command_id FROM jobs WHERE id=:job_id) AND state='READY'"),
+                    text(
+                        "UPDATE task_commands SET state='REJECTED' WHERE id=(SELECT command_id FROM jobs WHERE id=:job_id) AND state='READY'"
+                    ),
                     {"job_id": self.job_id},
                 )
                 await append_task_event_on_connection(
@@ -415,12 +643,14 @@ class TaskExecutionLease:
                     connection,
                     task_id=self.task_id,
                     event_type="task.failed",
-                    payload={"error": error},
+                    payload={"error": safe_error},
                 )
 
     async def release(self) -> None:
         await self.connection.execute(
-            text("SELECT pg_advisory_unlock(hashtextextended(CAST(:task_id AS text), 0))"),
+            text(
+                "SELECT pg_advisory_unlock(hashtextextended(CAST(:task_id AS text), 0))"
+            ),
             {"task_id": str(self.task_id)},
         )
         await self.connection.commit()
@@ -430,18 +660,24 @@ async def recover_abandoned_jobs(
     connection: AsyncConnection, *, stale_before: datetime
 ) -> int:
     """心跳仅发现候选；只有成功取得相同任务锁的协调器才能重新排队。"""
-    rows = (await connection.execute(
-        text("""SELECT id, task_id FROM jobs
+    rows = (
+        await connection.execute(
+            text("""SELECT id, task_id FROM jobs
                WHERE state='RUNNING' AND heartbeat_at < :stale_before
                ORDER BY heartbeat_at FOR UPDATE SKIP LOCKED"""),
-        {"stale_before": stale_before},
-    )).all()
+            {"stale_before": stale_before},
+        )
+    ).all()
     recovered = 0
     for job_id, task_id in rows:
-        acquired = bool(await connection.scalar(
-            text("SELECT pg_try_advisory_lock(hashtextextended(CAST(:task_id AS text), 0))"),
-            {"task_id": str(task_id)},
-        ))
+        acquired = bool(
+            await connection.scalar(
+                text(
+                    "SELECT pg_try_advisory_lock(hashtextextended(CAST(:task_id AS text), 0))"
+                ),
+                {"task_id": str(task_id)},
+            )
+        )
         if not acquired:
             continue
         try:
@@ -452,6 +688,44 @@ async def recover_abandoned_jobs(
                            WHERE id=:job_id AND state='RUNNING'"""),
                     {"job_id": job_id},
                 )
+                interrupted_spans = (
+                    await connection.execute(
+                        text("""SELECT id, trace_id, name, kind
+                               FROM trace_spans
+                               WHERE task_id=:task_id AND status='RUNNING'
+                               FOR UPDATE"""),
+                        {"task_id": task_id},
+                    )
+                ).all()
+                for span_id, trace_id, span_name, span_kind in interrupted_spans:
+                    span_error = {
+                        "code": "EXECUTION_INTERRUPTED",
+                        "retryable": True,
+                    }
+                    await connection.execute(
+                        text("""UPDATE trace_spans
+                               SET status='INTERRUPTED', end_at=now(),
+                                   error=CAST(:error AS jsonb)
+                               WHERE id=:span_id AND status='RUNNING'"""),
+                        {
+                            "span_id": span_id,
+                            "error": json.dumps(span_error),
+                        },
+                    )
+                    await append_task_event_on_connection(
+                        connection,
+                        task_id=task_id,
+                        event_type="span.failed",
+                        span_id=span_id,
+                        payload={
+                            "span_id": str(span_id),
+                            "trace_id": str(trace_id),
+                            "name": span_name,
+                            "kind": span_kind,
+                            "status": "INTERRUPTED",
+                            "error": span_error,
+                        },
+                    )
                 task_update = await connection.execute(
                     text("""UPDATE agent_tasks SET execution_epoch=execution_epoch+1,
                               state=CASE WHEN state='RUNNING' THEN 'QUEUED' ELSE state END,
@@ -473,7 +747,9 @@ async def recover_abandoned_jobs(
             recovered += 1
         finally:
             await connection.execute(
-                text("SELECT pg_advisory_unlock(hashtextextended(CAST(:task_id AS text), 0))"),
+                text(
+                    "SELECT pg_advisory_unlock(hashtextextended(CAST(:task_id AS text), 0))"
+                ),
                 {"task_id": str(task_id)},
             )
     return recovered

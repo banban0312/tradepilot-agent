@@ -292,7 +292,10 @@ class FunctionCallingRunner:
                     status="ERROR",
                     duration_ms=_elapsed_ms(started),
                     output_ref={"attempts": getattr(exc, "attempts", 1)},
-                    error={"code": code},
+                    error={
+                        "code": code,
+                        "retryable": bool(getattr(exc, "retryable", False)),
+                    },
                 )
                 raise FunctionCallingFailure(
                     code,
@@ -455,7 +458,11 @@ class FunctionCallingRunner:
                     span_id=span_id,
                     status="ERROR",
                     duration_ms=_elapsed_ms(started),
-                    error={"code": exc.code, "attempt": attempt},
+                    error={
+                        "code": exc.code,
+                        "attempt": attempt,
+                        "retryable": exc.retryable,
+                    },
                 )
                 raise
             except Exception as exc:
@@ -464,7 +471,11 @@ class FunctionCallingRunner:
                     span_id=span_id,
                     status="ERROR",
                     duration_ms=_elapsed_ms(started),
-                    error={"code": _mcp_error_code(exc), "attempt": attempt},
+                    error={
+                        "code": _mcp_error_code(exc),
+                        "attempt": attempt,
+                        "retryable": retryable,
+                    },
                 )
                 if retryable and attempt <= self.config.model_max_retries:
                     await asyncio.sleep(
@@ -641,7 +652,9 @@ class FunctionCallingRunner:
                     else _mcp_error_code(exc)
                 )
                 retryable = (
-                    exc.payload.retryable
+                    exc.retryable
+                    if isinstance(exc, FunctionCallingFailure)
+                    else exc.payload.retryable
                     if isinstance(exc, MCPCallError)
                     else isinstance(exc, MCPUnavailable)
                 )
@@ -649,7 +662,7 @@ class FunctionCallingRunner:
                     span_id=span_id,
                     status="ERROR",
                     duration_ms=_elapsed_ms(started),
-                    error={"code": code, "attempt": attempt},
+                    error={"code": code, "attempt": attempt, "retryable": retryable},
                 )
                 if isinstance(exc, FunctionCallingFailure):
                     raise

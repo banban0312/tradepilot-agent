@@ -49,6 +49,7 @@ from app.models import (
     TaskJob,
     TaskSession,
     TaskWait,
+    TraceSpan,
     User,
     UserDepartmentScope,
     UserRole,
@@ -56,6 +57,7 @@ from app.models import (
 from app.observability.service import append_task_event, list_task_events_after
 from app.tasks.service import (
     IdempotencyConflict,
+    command_job,
     create_task,
     enqueue_command,
 )
@@ -129,6 +131,11 @@ class TaskReviewRequest(StrictModel):
     checkpoint_id: str = Field(min_length=1, max_length=256)
     interrupt_id: str = Field(min_length=1, max_length=256)
     reason: str | None = Field(default=None, max_length=1000)
+
+
+class RetryTaskRequest(StrictModel):
+    failed_span_id: UUID
+    expected_projection_version: int = Field(ge=1)
 
 
 def _api_error(status: int, code: str, message: str) -> HTTPException:
@@ -477,6 +484,13 @@ async def get_task(
     ):
         available_actions.extend(("APPROVE", "RETURN", "REJECT"))
     order = await session.scalar(select(Order).where(Order.task_id == task.id))
+    if (
+        task.state == "FAILED"
+        and isinstance(task.last_error, dict)
+        and task.last_error.get("retryable") is True
+        and isinstance(task.last_error.get("failed_span_id"), str)
+    ):
+        available_actions.append("RETRY")
     return {
         "data": {
             "task_id": str(task.id),
@@ -539,6 +553,171 @@ async def get_task(
             "available_actions": available_actions,
             "created_at": task.created_at.isoformat(),
             "updated_at": task.updated_at.isoformat(),
+        },
+        "request_id": request_id(request),
+    }
+
+
+@router.post("/{task_id}/retry", status_code=202)
+async def retry_failed_task(
+    task_id: UUID,
+    body: RetryTaskRequest,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> dict[str, object]:
+    """只重放当前失败作业的持久 checkpoint，不接受客户端指定图节点。"""
+    key = _idempotency_key(idempotency_key)
+    task = await _visible_task(session, task_id, context, lock=True)
+    _require_task_operator(context)
+
+    prior = await session.scalar(
+        select(TaskCommand).where(
+            TaskCommand.task_id == task.id, TaskCommand.request_id == key
+        )
+    )
+    if prior is not None:
+        if (
+            prior.kind != "RETRY"
+            or prior.expected_version != body.expected_projection_version
+            or prior.payload.get("failed_span_id") != str(body.failed_span_id)
+        ):
+            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同恢复请求")
+        prior_job = await command_job(session, prior)
+        if prior_job is None:
+            raise _api_error(409, "RETRY_UNAVAILABLE", "恢复作业记录不存在")
+        return {
+            "data": {
+                "task_id": str(task.id),
+                "command_id": str(prior.id),
+                "job_id": str(prior_job.id),
+                "failed_span_id": str(body.failed_span_id),
+                "state": task.state,
+                "replayed": True,
+                "status_url": _status_url(task.id),
+            },
+            "request_id": request_id(request),
+        }
+
+    if task.state != "FAILED":
+        raise _api_error(409, "TASK_NOT_FAILED", "当前任务没有可重试的失败")
+    if task.projection_version != body.expected_projection_version:
+        raise _api_error(409, "VERSION_CONFLICT", "任务状态已变化，请刷新后重试")
+
+    last_error = task.last_error if isinstance(task.last_error, dict) else {}
+    if last_error.get("failed_span_id") != str(body.failed_span_id):
+        raise _api_error(409, "FAILED_SPAN_STALE", "失败位置已变化，请刷新任务详情")
+    span = await session.scalar(
+        select(TraceSpan).where(
+            TraceSpan.id == body.failed_span_id, TraceSpan.task_id == task.id
+        )
+    )
+    if span is None or span.status not in {"ERROR", "INTERRUPTED"}:
+        raise _api_error(409, "FAILED_SPAN_UNAVAILABLE", "失败轨迹不存在或尚未结束")
+    span_error = span.error if isinstance(span.error, dict) else {}
+    retryable = (
+        bool(last_error.get("retryable"))
+        or bool(span_error.get("retryable"))
+        or (
+            span.status == "INTERRUPTED"
+            and span_error.get("code") == "EXECUTION_INTERRUPTED"
+        )
+    )
+    if not retryable:
+        raise _api_error(
+            409, "TASK_FAILURE_NOT_RETRYABLE", "该失败属于业务阻断或不可重试错误"
+        )
+
+    failed_job = await session.scalar(
+        select(TaskJob)
+        .join(TaskCommand, TaskCommand.id == TaskJob.command_id)
+        .where(
+            TaskJob.task_id == task.id,
+            TaskJob.kind == "RUN_TASK",
+            TaskJob.state == "FAILED",
+        )
+        .order_by(TaskCommand.created_at.desc(), TaskCommand.id.desc())
+        .with_for_update(of=TaskJob)
+        .limit(1)
+    )
+    if failed_job is None or failed_job.command_id is None:
+        raise _api_error(409, "RETRY_UNAVAILABLE", "没有可安全恢复的失败作业")
+    failed_command = await session.get(TaskCommand, failed_job.command_id)
+    if failed_command is None:
+        raise _api_error(409, "RETRY_UNAVAILABLE", "失败作业缺少原始命令")
+    source_command_id = failed_command.payload.get("source_command_id")
+    if failed_command.kind == "RETRY":
+        if not isinstance(source_command_id, str):
+            raise _api_error(409, "RETRY_UNAVAILABLE", "恢复记录缺少原始命令引用")
+        try:
+            source_command_id = UUID(source_command_id)
+        except ValueError as exc:
+            raise _api_error(
+                409, "RETRY_UNAVAILABLE", "恢复记录中的原始命令无效"
+            ) from exc
+        source_command = await session.get(TaskCommand, source_command_id)
+    else:
+        source_command = failed_command
+    if source_command is None or source_command.task_id != task.id:
+        raise _api_error(409, "RETRY_UNAVAILABLE", "原始任务命令不存在")
+
+    active_wait = await session.scalar(
+        select(TaskWait)
+        .where(TaskWait.task_id == task.id, TaskWait.active)
+        .with_for_update()
+    )
+    if active_wait is not None and active_wait.pending_command_id not in (
+        None,
+        source_command.id,
+    ):
+        raise _api_error(409, "WAIT_CONFLICT", "任务已有其他等待命令，不能安全重试")
+
+    source_command.state = "READY"
+    payload = {
+        "failed_span_id": str(body.failed_span_id),
+        "source_command_id": str(source_command.id),
+    }
+    try:
+        enqueued = await enqueue_command(
+            session,
+            task_id=task.id,
+            actor_id=context.user_id,
+            kind="RETRY",
+            payload=payload,
+            request_id=key,
+            expected_version=body.expected_projection_version,
+            target_interrupt_id=source_command.target_interrupt_id,
+            reuse_job_id=failed_job.id,
+        )
+    except IdempotencyConflict as exc:
+        raise _api_error(409, "IDEMPOTENCY_CONFLICT", str(exc)) from exc
+    except ValueError as exc:
+        raise _api_error(409, "RETRY_UNAVAILABLE", str(exc)) from exc
+    await session.refresh(task)
+    if not enqueued.replayed:
+        await append_task_event(
+            session,
+            task_id=task.id,
+            event_type="task.retry_queued",
+            payload={
+                "state": "QUEUED",
+                "projection_version": task.projection_version,
+                "failed_span_id": body.failed_span_id,
+                "source_command_id": source_command.id,
+                "job_id": enqueued.job_id,
+            },
+        )
+    await session.commit()
+    return {
+        "data": {
+            "task_id": str(task.id),
+            "command_id": str(enqueued.command_id),
+            "job_id": str(enqueued.job_id),
+            "failed_span_id": str(body.failed_span_id),
+            "state": task.state,
+            "replayed": enqueued.replayed,
+            "status_url": _status_url(task.id),
         },
         "request_id": request_id(request),
     }
