@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from functools import partial
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.config import settings
 from app.database import async_session_factory, get_db_session
 from app.models import AgentTask, AuditEvent, InputArtifact, TaskArtifact, User
 from app.observability.service import append_task_event
+from app.parsing.image import parse_image
 from app.parsing.pdf import PdfParseError, parse_pdf, sha256_file
 from app.storage.files import (
     FileUploadError,
@@ -204,7 +206,7 @@ async def get_artifact_metadata(
 
 
 @router.post("/artifacts/{artifact_id}/parse")
-async def parse_artifact_pdf(
+async def parse_artifact(
     artifact_id: UUID,
     request: Request,
     context: Annotated[AuthContext, Depends(require_csrf)],
@@ -212,20 +214,49 @@ async def parse_artifact_pdf(
 ) -> JSONResponse:
     """解析需经附件鉴权；内容仅作为原始证据返回，不触发 Agent 或业务动作。"""
     artifact = await _readable_artifact(session, artifact_id, context)
-    if artifact.metadata_json.get("parse_intent") != "contract_pdf":
-        raise _api_error(415, "FILE_UNSUPPORTED", "当前解析接口仅支持合同 PDF")
+    parse_intent = artifact.metadata_json.get("parse_intent")
+    if parse_intent not in {"contract_pdf", "receipt_image"}:
+        raise _api_error(415, "FILE_UNSUPPORTED", "当前解析接口仅支持 PDF 和单据图片")
     if artifact.state != "STORED":
         raise _api_error(404, "RESOURCE_NOT_FOUND", "附件内容不存在")
     path = storage_path(settings.attachments_root, artifact.storage_key)
     if path.is_symlink() or not path.is_file():
         raise _api_error(503, "FILE_UNREADABLE", "附件存储暂不可用")
+    started = time.monotonic()
     try:
-        digest = await anyio.to_thread.run_sync(partial(sha256_file, path))
+        if (
+            parse_intent == "receipt_image"
+            and settings.ocr_provider != "local_tesseract"
+        ):
+            raise PdfParseError("OCR_UNAVAILABLE", "当前未配置可用的图片 OCR 引擎", 503)
+        try:
+            digest = await anyio.to_thread.run_sync(partial(sha256_file, path))
+        except OSError as exc:
+            raise PdfParseError("FILE_UNREADABLE", "附件存储暂不可用", 503) from exc
         if digest != artifact.sha256:
-            raise _api_error(503, "FILE_INTEGRITY_FAILED", "附件内容校验失败")
-        result = await anyio.to_thread.run_sync(partial(parse_pdf, path, digest))
+            raise PdfParseError("FILE_INTEGRITY_FAILED", "附件内容校验失败", 503)
+        parser = parse_pdf if parse_intent == "contract_pdf" else parse_image
+        result = await anyio.to_thread.run_sync(partial(parser, path, digest))
     except PdfParseError as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        session.add(
+            AuditEvent(
+                id=uuid4(),
+                task_id=None,
+                actor_id=context.user_id,
+                action="artifact.parse_failed",
+                object_ref={
+                    "artifact_id": str(artifact.id),
+                    "media_type": artifact.media_type,
+                },
+                after_ref={"code": exc.code, "elapsed_ms": elapsed_ms},
+                result="FAILURE",
+                input_hash=artifact.sha256,
+            )
+        )
+        await session.commit()
         raise _api_error(exc.status_code, exc.code, exc.message) from exc
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
     session.add(
         AuditEvent(
             id=uuid4(),
@@ -236,7 +267,11 @@ async def parse_artifact_pdf(
                 "artifact_id": str(artifact.id),
                 "media_type": artifact.media_type,
             },
-            after_ref={"state": result["state"], "page_count": result["page_count"]},
+            after_ref={
+                "state": result["state"],
+                "page_count": result.get("page_count", 1),
+                "elapsed_ms": result["elapsed_ms"],
+            },
             result="SUCCESS" if result["state"] == "COMPLETE" else "PARTIAL",
             input_hash=artifact.sha256,
         )
