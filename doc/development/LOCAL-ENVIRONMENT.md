@@ -80,6 +80,14 @@ pwsh -File code/scripts/verify_issue_014.ps1 -LiveModel
 
 该模式会产生少量真实模型调用用量。它使用隔离 Compose 数据库、随机端口和临时演示密码，验证任务到达 `WAITING_APPROVAL`、模型与业务工具轨迹成功、写入草稿且正式订单数未增加；结束后只清理本轮隔离项目。脚本会在进程环境中生成一次性 MCP 上下文签名密钥并在退出时恢复，不修改 `.env`。模型密钥不会写入 Git 或输出到日志。在线模型结果与默认离线/真实服务集成测试分别记录。
 
+## Issue #17 未知提交结果回查与安全恢复
+
+```powershell
+pwsh -NoProfile -File code/scripts/verify_issue_017.ps1
+```
+
+该脚本会启动独立的数据库、API 和前端代理服务，覆盖任务失败定位、不可重试规则阻断、版本冲突、幂等重试，以及已提交订单但响应未知时回放原订单且不重复占额。脚本依赖 Docker 和本地 `code/backend/.env`，只清理自己创建的随机 Compose 项目。实现说明与验证细节见 [`M3-03-RECOVERY.md`](M3-03-RECOVERY.md)。
+
 ## Issue #1 完整验证
 
 ```powershell
