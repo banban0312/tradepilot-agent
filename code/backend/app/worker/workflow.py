@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -24,10 +25,12 @@ from app.agent.workflow import (
 )
 from app.auth.context import AuthContext
 from app.config import Settings, settings
+from app.drafts.rules import precheck_candidate
 from app.drafts.service import load_draft
 from app.models import (
     AgentTask,
     Draft,
+    TaskApproval,
     TaskCommand,
     TaskJob,
     TaskWait,
@@ -103,12 +106,20 @@ class DatabaseWorkflowServices:
             snapshot = await load_draft(session, draft.id)
             if snapshot is None:
                 raise RuntimeError("草稿头存在但当前版本缺失")
+            issues = list(snapshot.issues)
+            if snapshot.is_validated and snapshot.candidate is not None:
+                precheck = await precheck_candidate(
+                    session,
+                    candidate=snapshot.candidate,
+                    actor=self.actor,
+                    business_date=datetime.now(ZoneInfo(self.config.business_timezone)).date(),
+                )
+                issues.extend(precheck.issues)
             return {
                 "draft_id": str(snapshot.draft_id),
                 "draft_version": snapshot.version,
                 "missing_fields": [
-                    {"field": item.field, "message": item.message}
-                    for item in snapshot.issues
+                    {"field": item.field, "message": item.message} for item in issues
                 ],
             }
 
@@ -122,11 +133,106 @@ class DatabaseWorkflowServices:
             snapshot = await load_draft(session, draft.id)
             if snapshot is None:
                 return {"exists": False}
+            issues = list(snapshot.issues)
+            if snapshot.is_validated and snapshot.candidate is not None:
+                precheck = await precheck_candidate(
+                    session,
+                    candidate=snapshot.candidate,
+                    actor=self.actor,
+                    business_date=datetime.now(ZoneInfo(self.config.business_timezone)).date(),
+                )
+                issues.extend(precheck.issues)
             return {
                 "exists": True,
                 "draft_id": str(snapshot.draft_id),
                 "draft_version": snapshot.version,
-                "reviewable": snapshot.is_validated,
+                "content_hash": snapshot.content_hash,
+                "reviewable": snapshot.is_validated and not issues,
+                "issues": [
+                    {"field": issue.field, "message": issue.message} for issue in issues
+                ],
+            }
+
+    async def load_review_command(
+        self, command_id: UUID, *, state: WorkflowState
+    ) -> Mapping[str, Any]:
+        async with self.session_factory() as session:
+            command = await session.get(TaskCommand, command_id)
+            wait = await session.scalar(
+                select(TaskWait).where(TaskWait.task_id == self.task.id, TaskWait.active)
+            )
+            if (
+                command is None
+                or command.task_id != self.task.id
+                or command.state != "READY"
+                or wait is None
+                or wait.kind != "APPROVAL"
+                or wait.pending_command_id != command.id
+                or command.target_interrupt_id != wait.interrupt_id
+                or command.expected_version != wait.draft_version
+            ):
+                raise WorkflowResumeConflict("审批或编辑命令与当前等待版本不匹配")
+            if command.kind == "INPUT" and command.payload.get("operation") == "DRAFT_PATCH":
+                text = command.payload.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise WorkflowResumeConflict("草稿修改命令缺少有效说明")
+                return {
+                    "id": str(command.id),
+                    "decision": "EDIT",
+                    "text": text,
+                    "expected_version": command.expected_version,
+                    "input_at": command.created_at.isoformat(),
+                }
+            if command.kind != "REVIEW":
+                raise WorkflowResumeConflict("审批等待点只接受审批或草稿编辑命令")
+            approval = await session.scalar(
+                select(TaskApproval).where(TaskApproval.command_id == command.id)
+            )
+            if (
+                approval is None
+                or approval.invalidated_at is not None
+                or approval.task_id != self.task.id
+                or str(approval.draft_id) != wait.payload.get("draft_id")
+                or approval.version != wait.draft_version
+                or approval.content_hash != wait.payload.get("content_hash")
+                or approval.checkpoint_ref != wait.checkpoint_ref
+                or approval.interrupt_id != wait.interrupt_id
+                or approval.actor_id != command.actor_id
+                or command.payload.get("decision") != approval.decision
+                or command.payload.get("draft_id") != str(approval.draft_id)
+                or command.payload.get("content_hash") != approval.content_hash
+                or command.payload.get("checkpoint_id") != approval.checkpoint_ref
+                or command.payload.get("interrupt_id") != approval.interrupt_id
+            ):
+                raise WorkflowResumeConflict("持久审批与当前草稿版本不匹配或已失效")
+            draft = await session.get(Draft, approval.draft_id)
+            snapshot = await load_draft(session, approval.draft_id)
+            if (
+                draft is None
+                or snapshot is None
+                or snapshot.version != approval.version
+                or snapshot.content_hash != approval.content_hash
+            ):
+                raise WorkflowResumeConflict("审批草稿已修改或不再满足校验条件")
+            if approval.decision == "APPROVE":
+                if not snapshot.is_validated or snapshot.candidate is None:
+                    raise WorkflowResumeConflict("审批草稿已修改或不再满足校验条件")
+                result = await precheck_candidate(
+                    session,
+                    candidate=snapshot.candidate,
+                    actor=self.actor,
+                    business_date=datetime.now(ZoneInfo(self.config.business_timezone)).date(),
+                )
+                if result.issues:
+                    raise WorkflowResumeConflict("审批后业务规则或合同额度已变化")
+            return {
+                "id": str(command.id),
+                "decision": approval.decision,
+                "actor_id": str(approval.actor_id),
+                "draft_id": str(approval.draft_id),
+                "expected_version": approval.version,
+                "content_hash": approval.content_hash,
+                "comment": approval.comment,
             }
 
     async def load_resume_command(
@@ -228,15 +334,17 @@ async def create_run_task_handler(
         await saver.setup()
         graph = build_task_graph(services, checkpointer=saver)
         resume_projection: tuple[str, str] | None = None
-        if command_copy.kind == "INPUT":
+        if command_copy.kind in {"INPUT", "REVIEW"}:
             async with session_factory() as session:
                 wait = await session.scalar(
                     select(TaskWait).where(TaskWait.task_id == task.id, TaskWait.active)
                 )
-                if (
+                is_current_wait = (
                     wait is not None
                     and command_copy.target_interrupt_id == wait.interrupt_id
-                ):
+                    and (command_copy.kind != "REVIEW" or wait.kind == "APPROVAL")
+                )
+                if is_current_wait:
                     wait_checkpoint, wait_interrupt = (
                         wait.checkpoint_ref,
                         wait.interrupt_id,
@@ -293,7 +401,7 @@ async def create_run_task_handler(
             )
         snapshot = await graph.aget_state(task_graph_config(task.id))
         details = wait_details(snapshot)
-        if command_copy.kind == "INPUT" and resume_projection is not None:
+        if command_copy.kind in {"INPUT", "REVIEW"} and resume_projection is not None:
             await complete_resume_projection(
                 lease,
                 command_id=command_copy.id,

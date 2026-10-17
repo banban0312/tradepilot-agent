@@ -321,7 +321,7 @@ class TaskExecutionLease:
     ) -> None:
         """按 epoch 更新投影；仅接受已定义任务状态。"""
         allowed = {
-            "QUEUED", "RUNNING", "WAITING_INPUT", "WAITING_APPROVAL", "BLOCKED_RULE",
+            "QUEUED", "RUNNING", "WAITING_INPUT", "WAITING_APPROVAL", "SUBMITTING", "BLOCKED_RULE",
             "FAILED", "COMPLETED", "REJECTED",
         }
         if state not in allowed:

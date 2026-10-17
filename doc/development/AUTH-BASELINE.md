@@ -1,13 +1,14 @@
 # 登录会话与授权基线
 
-本文说明 M1-03 已交付的后端登录与授权基础。当前没有草稿、审批或订单业务 API；这些接口接入时必须复用 `app.auth` 中的可信上下文、角色和部门范围策略。
+本文说明后端登录、授权及演示身份配置。任务审批 API 复用 `app.auth` 中的可信上下文、角色和部门范围策略。
 
 ## 初始化
 
 1. 复制 `code/backend/.env.example` 为 `code/backend/.env`，设置本机 PostgreSQL 密码。
 2. 如需使用演示账号，显式设置 `DEMO_MODE=true` 和长度至少 12 个字符的 `DEMO_PASSWORD`。项目不内置通用默认账号密码。
-3. 本机 HTTP 演示默认使用 `APP_ORIGIN=http://localhost:5173` 和 `SESSION_COOKIE_SECURE=false`；HTTPS 部署必须将 Secure 设为 `true`，并把 `APP_ORIGIN` 改为浏览器访问的同源地址。
-4. 在 `code/` 运行 `docker compose --env-file backend/.env up --build --detach --wait api`，然后执行：
+3. 演示环境默认禁止经办人批准本人草稿；只有同时显式设置 `DEMO_ALLOW_SELF_APPROVAL=true` 与 `DEMO_MODE=true` 才启用本人确认。
+4. 本机 HTTP 演示默认使用 `APP_ORIGIN=http://localhost:5173` 和 `SESSION_COOKIE_SECURE=false`；HTTPS 部署必须将 Secure 设为 `true`，并把 `APP_ORIGIN` 改为浏览器访问的同源地址。
+5. 在 `code/` 运行 `docker compose --env-file backend/.env up --build --detach --wait api`，然后执行：
 
    ```powershell
    docker compose --env-file backend/.env exec api uv run --frozen alembic upgrade head

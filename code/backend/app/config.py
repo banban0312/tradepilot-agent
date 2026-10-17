@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     ocr_provider: str | None = None
     ocr_api_key: SecretStr | None = None
     demo_mode: bool = False
+    demo_allow_self_approval: bool = False
     demo_password: SecretStr | None = None
     session_ttl_hours: int = Field(default=12, gt=0, le=720)
     session_cookie_secure: bool = True

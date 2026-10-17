@@ -228,6 +228,7 @@ async def complete_resume_projection(
             allowed = {
                 "WAITING_INPUT",
                 "WAITING_APPROVAL",
+                "SUBMITTING",
                 "BLOCKED_RULE",
                 "FAILED",
                 "COMPLETED",
@@ -237,7 +238,10 @@ async def complete_resume_projection(
                 raise ValueError("恢复后的任务状态投影无效")
             task.state = str(next_state)
             task.checkpoint_ref = str(result.get("checkpoint_ref") or checkpoint_ref)
-            task.current_step = "persist_draft"
+            task.current_step = {
+                "SUBMITTING": "commit_order",
+                "REJECTED": "rejected",
+            }.get(task.state, "await_review")
         task.projection_version += 1
         await append_task_event(
             session,
