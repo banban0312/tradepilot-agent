@@ -205,6 +205,75 @@ class AgentTask(TimestampMixin, Base):
     config_snapshot_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
 
 
+class InputArtifact(TimestampMixin, Base):
+    """受控存储的上传文件元数据；文件名不参与存储路径生成。"""
+
+    __tablename__ = "input_artifacts"
+    __table_args__ = (
+        UniqueConstraint("storage_key", name="uq_input_artifacts_storage_key"),
+        CheckConstraint("byte_size > 0", name="ck_input_artifacts_byte_size_positive"),
+        CheckConstraint(
+            "state IN ('STORED', 'PROCESSING', 'PARSED', 'FAILED', 'DELETED')",
+            name="ck_input_artifacts_state",
+        ),
+        Index("ix_input_artifacts_owner_created", "owner_id", "created_at"),
+        ForeignKeyConstraint(
+            ["owner_id"],
+            ["users.id"],
+            name="fk_input_artifacts_owner",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["department_id"],
+            ["departments.id"],
+            name="fk_input_artifacts_department",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(127), nullable=False)
+    original_name: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="STORED"
+    )
+    metadata_json: Mapped[dict[str, object]] = mapped_column(
+        "metadata", JSONB, nullable=False
+    )
+
+
+class TaskArtifact(Base):
+    """显式任务引用；只有当前身份可见的任务可以授权读取其附件。"""
+
+    __tablename__ = "task_artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_task_artifacts_task",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["artifact_id"],
+            ["input_artifacts.id"],
+            name="fk_task_artifacts_artifact",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_task_artifacts_artifact_id", "artifact_id"),
+    )
+
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    artifact_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TaskCommand(Base):
     """持久化用户动作；request_id 重放返回原命令，不重复排队。"""
 

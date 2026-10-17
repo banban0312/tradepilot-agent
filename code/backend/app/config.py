@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = True
     app_origin: str | None = None
     trace_retention_days: int = Field(default=30, ge=1, le=3650)
+    artifact_retention_days: int = Field(default=30, ge=1, le=3650)
 
     @field_validator("business_timezone")
     @classmethod
