@@ -23,6 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -221,6 +222,33 @@ class TaskJob(Base):
     worker_id: Mapped[str | None] = mapped_column(String(128))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_epoch: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class TaskWait(Base):
+    """当前图中断的业务投影；checkpoint 本身仍由官方 LangGraph 表维护。"""
+
+    __tablename__ = "task_waits"
+    __table_args__ = (
+        CheckConstraint("kind IN ('INPUT', 'APPROVAL')", name="ck_task_waits_kind"),
+        ForeignKeyConstraint(["task_id"], ["agent_tasks.id"], name="fk_task_waits_task", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["pending_command_id"], ["task_commands.id"], name="fk_task_waits_pending_command", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["consumed_command_id"], ["task_commands.id"], name="fk_task_waits_consumed_command", ondelete="RESTRICT"),
+        UniqueConstraint("checkpoint_ref", "interrupt_id", name="uq_task_waits_checkpoint_interrupt"),
+        Index("uq_task_waits_active_task", "task_id", unique=True, postgresql_where=text("active")),
+        Index("ix_task_waits_task_created", "task_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    checkpoint_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    interrupt_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    draft_version: Mapped[int | None] = mapped_column(Integer)
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    pending_command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    consumed_command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class Customer(TimestampMixin, Base):
