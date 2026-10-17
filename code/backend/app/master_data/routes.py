@@ -246,8 +246,14 @@ async def _contract_lines(
 def _balance_data(
     contract: Contract, balance: ContractBalance | None
 ) -> dict[str, object]:
-    occupied = balance.occupied_amount if balance is not None else Decimal("0.00")
-    order_count = balance.occupied_order_count if balance is not None else 0
+    if balance is None:
+        raise _fail(
+            503,
+            "CONTRACT_BALANCE_UNAVAILABLE",
+            "合同余额账本缺失，暂不能安全读取合同统计",
+        )
+    occupied = balance.occupied_amount
+    order_count = balance.occupied_order_count
     return {
         "occupied_amount": str(occupied),
         "order_count": order_count,
@@ -599,15 +605,19 @@ async def update_contract(
         .where(ContractBalance.contract_id == contract.id)
         .with_for_update()
     )
+    if balance is None:
+        raise _fail(
+            503,
+            "CONTRACT_BALANCE_UNAVAILABLE",
+            "合同余额账本缺失，暂不能安全修改合同",
+        )
     if "total_amount" in updates:
         booked_orders = await session.scalar(
             select(func.coalesce(func.sum(Order.total_amount), 0)).where(
                 Order.contract_id == contract.id
             )
         )
-        occupied_amount = (
-            balance.occupied_amount if balance is not None else Decimal("0.00")
-        )
+        occupied_amount = balance.occupied_amount
         if updates["total_amount"] < max(occupied_amount, Decimal(booked_orders or 0)):
             raise _fail(
                 409, "CONTRACT_TOTAL_BELOW_OCCUPIED", "合同总额不能低于已占用金额"
@@ -675,6 +685,14 @@ async def update_contract(
                 .where(ContractLineBalance.contract_line_id == line.id)
                 .with_for_update()
             )
+            if line_balance is None and (
+                line.max_quantity is not None or line_input.max_quantity is not None
+            ):
+                raise _fail(
+                    503,
+                    "CONTRACT_LINE_BALANCE_UNAVAILABLE",
+                    "已配置数量上限的合同明细缺少履约账本，暂不能安全修改",
+                )
             if (
                 line_input.max_quantity is not None
                 and line_balance is not None

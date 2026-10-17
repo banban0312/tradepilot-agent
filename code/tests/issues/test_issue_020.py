@@ -19,6 +19,8 @@ from app.models import (
     AuditEvent,
     Contract,
     ContractBalance,
+    ContractLine,
+    ContractLineBalance,
     Draft,
     DraftItem,
     DraftRevision,
@@ -66,6 +68,101 @@ async def test_master_data_permissions_contract_rules_and_alias_audit() -> None:
         )
         assert contract["occupied_amount"] == "0.00"
         assert contract["remaining_amount"] == contract["total_amount"]
+
+        # 余额账本缺失时不能把未知占用伪装成零，也不能继续修改合同。
+        async with async_session_factory() as session:
+            balance = await session.get(ContractBalance, NORTH_CONTRACT)
+            assert balance is not None
+            saved_balance = (
+                balance.occupied_amount,
+                balance.occupied_order_count,
+                balance.version,
+            )
+            await session.delete(balance)
+            await session.commit()
+        try:
+            for path in (
+                "/api/v1/admin/contracts",
+                f"/api/v1/admin/contracts/{contract['id']}",
+            ):
+                missing_ledger = await admin.get(path)
+                assert missing_ledger.status_code == 503, missing_ledger.text
+                assert missing_ledger.json()["error"]["code"] == (
+                    "CONTRACT_BALANCE_UNAVAILABLE"
+                )
+            blocked_edit = await admin.patch(
+                f"/api/v1/admin/contracts/{contract['id']}",
+                json={
+                    "expected_version": contract["version"],
+                    "total_amount": contract["total_amount"],
+                },
+            )
+            assert blocked_edit.status_code == 503, blocked_edit.text
+            assert blocked_edit.json()["error"]["code"] == (
+                "CONTRACT_BALANCE_UNAVAILABLE"
+            )
+        finally:
+            async with async_session_factory() as session:
+                if await session.get(ContractBalance, NORTH_CONTRACT) is None:
+                    session.add(
+                        ContractBalance(
+                            contract_id=NORTH_CONTRACT,
+                            occupied_amount=saved_balance[0],
+                            occupied_order_count=saved_balance[1],
+                            version=saved_balance[2],
+                        )
+                    )
+                    await session.commit()
+
+        # 已配置数量上限的合同明细缺账时，也不能跳过履约数量保护。
+        detail_response = await admin.get(f"/api/v1/admin/contracts/{contract['id']}")
+        assert detail_response.status_code == 200, detail_response.text
+        contract_detail = detail_response.json()["data"]
+        assert contract_detail["lines"]
+        line_data = contract_detail["lines"][0]
+        line_id = UUID(line_data["id"])
+        async with async_session_factory() as session:
+            line = await session.get(ContractLine, line_id)
+            line_balance = await session.get(ContractLineBalance, line_id)
+            assert line is not None and line_balance is not None
+            saved_max_quantity = line.max_quantity
+            saved_occupied_quantity = line_balance.occupied_quantity
+            line.max_quantity = Decimal("999999999.000000")
+            await session.delete(line_balance)
+            await session.commit()
+        try:
+            blocked_quantity_edit = await admin.patch(
+                f"/api/v1/admin/contracts/{contract['id']}",
+                json={
+                    "expected_version": contract["version"],
+                    "lines": [
+                        {
+                            "line_id": str(line_id),
+                            "material_id": line_data["material_id"],
+                            "unit": line_data["unit"],
+                            "unit_price": line_data["unit_price"],
+                            "max_quantity": "1.000000",
+                        }
+                    ],
+                },
+            )
+            assert blocked_quantity_edit.status_code == 503, blocked_quantity_edit.text
+            assert blocked_quantity_edit.json()["error"]["code"] == (
+                "CONTRACT_LINE_BALANCE_UNAVAILABLE"
+            )
+        finally:
+            async with async_session_factory() as session:
+                line = await session.get(ContractLine, line_id)
+                assert line is not None
+                line.max_quantity = saved_max_quantity
+                if await session.get(ContractLineBalance, line_id) is None:
+                    session.add(
+                        ContractLineBalance(
+                            contract_line_id=line_id,
+                            occupied_quantity=saved_occupied_quantity,
+                        )
+                    )
+                await session.commit()
 
         # 台账统计是服务端事实，不能通过合同写接口伪造；额度下限来自余额账本。
         csrf_missing = await admin.patch(
