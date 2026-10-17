@@ -74,7 +74,8 @@ class PersistentTaskWorker:
         try:
             async with self.session_factory() as session, session.begin():
                 job = await try_claim_job(
-                    session, worker_id=self.worker_id,
+                    session,
+                    worker_id=self.worker_id,
                     supported_kinds=frozenset(self.handlers),
                 )
             if job is None:
@@ -85,7 +86,9 @@ class PersistentTaskWorker:
                     pass
                 try:
                     lease = await TaskExecutionLease.acquire(
-                        connection, task_id=job.task_id, job_id=job.id,
+                        connection,
+                        task_id=job.task_id,
+                        job_id=job.id,
                         worker_id=self.worker_id,
                     )
                 except TaskLockUnavailable:
@@ -105,18 +108,33 @@ class PersistentTaskWorker:
                     # 不伪报成功；释放数据库锁后由心跳恢复器重新排队原 job/task。
                     raise
                 except (StaleExecutionEpoch, LeaseHeartbeatLost):
-                    logger.warning("任务执行租约失效，等待持久恢复协调器处理 job_id=%s", job.id)
+                    logger.warning(
+                        "任务执行租约失效，等待持久恢复协调器处理 job_id=%s", job.id
+                    )
                 except Exception as exc:
                     logger.exception("作业执行失败，job_id=%s", job.id)
+                    failure = {
+                        "code": str(getattr(exc, "code", "WORKER_EXECUTION_FAILED")),
+                        "type": type(exc).__name__,
+                        "retryable": bool(getattr(exc, "retryable", False)),
+                    }
+                    stage = getattr(exc, "stage", None)
+                    if isinstance(stage, str) and stage:
+                        failure["stage"] = stage
                     try:
-                        await lease.finish(error={"code": "WORKER_EXECUTION_FAILED", "type": type(exc).__name__})
+                        await lease.finish(error=failure)
                     except StaleExecutionEpoch:
-                        logger.warning("任务 epoch 已更新，忽略旧 Worker 失败投影 job_id=%s", job.id)
+                        logger.warning(
+                            "任务 epoch 已更新，忽略旧 Worker 失败投影 job_id=%s",
+                            job.id,
+                        )
                 finally:
                     try:
                         await lease.release()
                     except Exception:
-                        logger.warning("释放任务锁时连接已断开，job_id=%s", job.id, exc_info=True)
+                        logger.warning(
+                            "释放任务锁时连接已断开，job_id=%s", job.id, exc_info=True
+                        )
             return True
         finally:
             self._slots.release()
@@ -174,7 +192,8 @@ class PersistentTaskWorker:
             elif running:
                 try:
                     await asyncio.wait(
-                        running, timeout=self.poll_seconds,
+                        running,
+                        timeout=self.poll_seconds,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 except TimeoutError:

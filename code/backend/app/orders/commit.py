@@ -45,6 +45,13 @@ class OrderCommitRejected(RuntimeError):
     """提交身份或批准绑定已失效；订单与额度不会被写入。"""
 
 
+class OrderCommitResultUnknown(RuntimeError):
+    """数据库事务响应中断；必须先回查订单事实，再决定是否续跑。"""
+
+    code = "ORDER_COMMIT_RESULT_UNKNOWN"
+    retryable = True
+
+
 @dataclass(frozen=True, slots=True)
 class OrderCommitResult:
     state: str

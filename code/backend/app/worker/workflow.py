@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.agent.function_calling import create_database_runner
@@ -38,7 +41,8 @@ from app.models import (
     UserDepartmentScope,
     UserRole,
 )
-from app.orders.commit import commit_approved_order
+from app.observability.service import finish_span, start_span
+from app.orders.commit import OrderCommitResultUnknown, commit_approved_order
 from app.tasks.checkpointer import EpochFencedPostgresSaver
 from app.tasks.service import TaskExecutionLease
 from app.tasks.waits import (
@@ -46,6 +50,8 @@ from app.tasks.waits import (
     complete_resume_projection,
     project_wait,
 )
+
+logger = logging.getLogger("tradepilot.worker.workflow")
 
 
 class DatabaseWorkflowServices:
@@ -248,15 +254,90 @@ class DatabaseWorkflowServices:
             approval_id = UUID(str(resumed.get("approval_id")))
         except (ValueError, TypeError) as exc:
             raise WorkflowResumeConflict("订单提交缺少有效审批标识") from exc
-        async with self.lease.write_session() as session:
-            result = await commit_approved_order(
-                session,
-                task_id=self.task.id,
-                command_id=command_id,
-                approval_id=approval_id,
-                config=self.config,
-            )
+        started = time.monotonic()
+        span_id: UUID | None = None
+        try:
+            async with self.session_factory() as session, session.begin():
+                span = await start_span(
+                    session,
+                    name="order.commit",
+                    kind="ORDER",
+                    execution_mode="LIVE",
+                    task_id=self.task.id,
+                    actor=getattr(self, "actor", None),
+                    protocol="postgresql",
+                    input_ref={"command_id": command_id, "approval_id": approval_id},
+                )
+                span_id = span.id
+            async with self.lease.write_session() as session:
+                result = await commit_approved_order(
+                    session,
+                    task_id=self.task.id,
+                    command_id=command_id,
+                    approval_id=approval_id,
+                    config=self.config,
+                )
+            async with self.session_factory() as session, session.begin():
+                await finish_span(
+                    session,
+                    span_id=span_id,
+                    status="ERROR" if result.state == "BLOCKED_RULE" else "OK",
+                    duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                    output_ref={
+                        "state": result.state,
+                        "order_id": result.order_id,
+                        "order_number": result.order_number,
+                        "replayed": result.replayed,
+                    },
+                    error=(
+                        {
+                            "code": result.code or "ORDER_COMMIT_BLOCKED",
+                            "retryable": False,
+                        }
+                        if result.state == "BLOCKED_RULE"
+                        else None
+                    ),
+                )
             return result.as_dict()
+        except SQLAlchemyError as exc:
+            if span_id is not None:
+                try:
+                    async with self.session_factory() as session, session.begin():
+                        await finish_span(
+                            session,
+                            span_id=span_id,
+                            status="ERROR",
+                            duration_ms=max(
+                                0, int((time.monotonic() - started) * 1000)
+                            ),
+                            error={
+                                "code": OrderCommitResultUnknown.code,
+                                "retryable": True,
+                            },
+                        )
+                except (SQLAlchemyError, ValueError):
+                    # 数据库不可读时保留 RUNNING span；任务失败投影会将其标为中断。
+                    logger.warning("订单结果未知时无法完成失败 span", exc_info=True)
+            raise OrderCommitResultUnknown(
+                "订单事务结果未知，重试前必须回查订单"
+            ) from exc
+        except Exception as exc:
+            code = str(getattr(exc, "code", "ORDER_COMMIT_FAILED"))
+            if span_id is not None:
+                try:
+                    async with self.session_factory() as session, session.begin():
+                        await finish_span(
+                            session,
+                            span_id=span_id,
+                            status="ERROR",
+                            duration_ms=max(
+                                0, int((time.monotonic() - started) * 1000)
+                            ),
+                            error={"code": code, "retryable": False},
+                        )
+                except (SQLAlchemyError, ValueError):
+                    logger.warning("订单失败 span 保存失败", exc_info=True)
+            raise
 
     async def load_resume_command(
         self, command_id: UUID, *, state: WorkflowState
@@ -301,11 +382,25 @@ async def create_run_task_handler(
     """创建持久作业 handler；注册时不暴露审批或正式订单能力。"""
 
     async def handle(lease: TaskExecutionLease, job: TaskJob) -> None:
+        retry_source_command_id: UUID | None = None
         async with session_factory() as session:
             command = await session.get(TaskCommand, job.command_id)
             task = await session.get(AgentTask, lease.task_id)
             if command is None or task is None:
                 raise LookupError("任务作业缺少命令或任务")
+            if command.kind == "RETRY":
+                source_id = command.payload.get("source_command_id")
+                if not isinstance(source_id, str):
+                    raise WorkflowResumeConflict("恢复命令缺少原始任务命令")
+                try:
+                    retry_source_command_id = UUID(source_id)
+                except ValueError as exc:
+                    raise WorkflowResumeConflict(
+                        "恢复命令中的原始任务命令无效"
+                    ) from exc
+                command = await session.get(TaskCommand, retry_source_command_id)
+                if command is None or command.task_id != task.id:
+                    raise WorkflowResumeConflict("恢复命令引用的原始任务命令不存在")
             user = await session.get(User, task.owner_id)
             roles = frozenset(
                 await session.scalars(
@@ -447,5 +542,14 @@ async def create_run_task_handler(
                 checkpoint_ref=checkpoint_id,
                 current_step="persist_draft",
             )
+        if retry_source_command_id is not None:
+            async with session_factory() as session, session.begin():
+                source_command = await session.get(
+                    TaskCommand, retry_source_command_id, with_for_update=True
+                )
+                if source_command is None:
+                    raise WorkflowResumeConflict("恢复后找不到原始任务命令")
+                if source_command.state == "READY":
+                    source_command.state = "APPLIED"
 
     return handle
