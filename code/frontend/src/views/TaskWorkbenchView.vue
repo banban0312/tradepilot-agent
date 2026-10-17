@@ -190,11 +190,21 @@ async function refreshSnapshot(generation = taskGeneration) {
   try {
     const snapshot = await tasksApi.get(route.params.taskId)
     if (generation !== taskGeneration) return
+    const previousOrderId = task.value?.order_ref?.order_id
     task.value = snapshot
+    if (!previousOrderId && snapshot.order_ref?.order_id) {
+      window.dispatchEvent(new CustomEvent('tradepilot:order-created', { detail: { orderId: snapshot.order_ref.order_id } }))
+    }
     syncFormFromTask(snapshot)
   } catch (error) {
     if (generation === taskGeneration) errorMessage.value = error instanceof Error ? error.message : '读取任务失败。'
   }
+}
+
+function openCreatedOrder() {
+  const orderId = task.value?.order_ref?.order_id
+  if (!orderId) return
+  void router.push({ name: 'order-center', query: { order_id: orderId } })
 }
 
 function stopEvents() {
@@ -537,7 +547,7 @@ async function openTask(taskId: string) {
             <article v-for="message in task.inputs" :key="message.command_id" class="conversation-message conversation-message--user"><span class="conversation-message__avatar">{{ auth.identity?.login.slice(0, 1).toUpperCase() }}</span><div><div class="conversation-message__meta"><strong>业务需求</strong><time>{{ formatTime(message.created_at) }}</time></div><p>{{ message.text }}</p></div></article>
             <article v-if="task.active_wait?.reason" class="conversation-message conversation-message--system"><span class="conversation-message__avatar"><AppIcon name="sparkles" :size="16" /></span><div><div class="conversation-message__meta"><strong>{{ task.active_wait.kind === 'APPROVAL' ? '审批等待' : '需要补充信息' }}</strong><span>服务端任务状态</span></div><p>{{ task.active_wait.reason }}</p><ul v-if="missingLabels.length" class="missing-field-list"><li v-for="label in missingLabels" :key="label">{{ label }}</li></ul></div></article>
             <article v-if="task.latest_review" class="conversation-message conversation-message--system"><span class="conversation-message__avatar"><AppIcon name="shield" :size="16" /></span><div><div class="conversation-message__meta"><strong>人工审批记录</strong><time>{{ formatTime(task.latest_review.created_at) }}</time></div><p>{{ task.latest_review.decision === 'APPROVE' ? '已批准' : task.latest_review.decision === 'RETURN' ? '已退回' : '已拒绝' }}<template v-if="task.latest_review.invalidated"> · 该决定已因草稿变更失效</template><template v-if="task.latest_review.comment">：{{ task.latest_review.comment }}</template></p><small>审批绑定草稿 v{{ task.latest_review.version }} · 当前 v{{ task.draft?.version ?? '—' }}</small></div></article>
-            <div v-if="task.order_ref" class="order-created-result"><AppIcon name="check" :size="18" /><div><strong>服务端已确认订单创建</strong><span>{{ task.order_ref.order_number }} · {{ formatMoney(task.order_ref.total_amount) }} {{ task.order_ref.currency }}</span></div></div>
+            <div v-if="task.order_ref" class="order-created-result"><AppIcon name="check" :size="18" /><div><strong>服务端已确认订单创建</strong><span>{{ task.order_ref.order_number }} · {{ formatMoney(task.order_ref.total_amount) }} {{ task.order_ref.currency }}</span></div><button class="secondary-button" type="button" @click="openCreatedOrder">在订单中心查看</button></div>
             <div v-if="activity.length" class="activity-section"><h3>任务运行轨迹与事件</h3><ol class="activity-list"><li v-for="item in activity" :key="`${item.seq}-${item.type}`"><span class="activity-list__dot"></span><div><strong>{{ eventTitle(item) }}</strong><small>{{ formatTime(item.emitted_at) }}<template v-if="item.seq"> · 事件 {{ item.seq }}</template></small><small v-if="eventDetail(item)">{{ eventDetail(item) }}</small></div></li></ol></div>
             <div v-if="!task.inputs.length && !task.order_ref" class="conversation-empty">等待服务端写入任务内容和运行状态…</div>
           </div>

@@ -260,9 +260,10 @@ a { color: inherit; text-decoration: none; }
 .missing-field-list { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 0; padding: 0; list-style: none; }
 .missing-field-list li { padding: 3px 7px; border-radius: 3px; background: #fff0d5; color: #85560b; font-size: 10px; }
 .conversation-empty { display: grid; min-height: 135px; place-items: center; color: var(--color-muted); font-size: 11px; }
-.order-created-result { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid #cce7db; border-radius: 5px; background: #eff9f4; color: var(--color-success); }
+.order-created-result { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px; border: 1px solid #cce7db; border-radius: 5px; background: #eff9f4; color: var(--color-success); }
 .order-created-result div { display: grid; gap: 4px; font-size: 12px; }
 .order-created-result span { font-size: 11px; }
+.order-created-result .secondary-button { min-height: 33px; flex: 0 0 auto; margin-left: auto; padding: 0 10px; font-size: 10px; }
 .activity-section { margin-top: 9px; padding-top: 13px; border-top: 1px solid #edf1f4; }
 .activity-section h3 { margin: 0 0 11px; color: #526b7a; font-size: 10px; font-weight: 600; }
 .activity-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
