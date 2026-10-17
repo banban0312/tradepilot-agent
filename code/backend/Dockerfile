@@ -8,7 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY --from=uv /uv /uvx /bin/
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY backend/app ./app
 COPY backend/alembic.ini ./alembic.ini

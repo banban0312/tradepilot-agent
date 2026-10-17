@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     @property
     def ocr_configuration_state(self) -> str:
         """仅报告 OCR 配置是否齐全。"""
+        if self.ocr_provider == "local_tesseract":
+            return "configured_unverified"
         if (
             self.ocr_provider
             and self.ocr_api_key
