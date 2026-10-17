@@ -41,6 +41,7 @@ from app.models import (
     Contract,
     Department,
     Draft,
+    Order,
     TaskApproval,
     TaskCommand,
     TaskEvent,
@@ -463,10 +464,19 @@ async def get_task(
             "reason": wait.payload.get("reason"),
         }
     available_actions: list[str] = []
-    if task.state == "WAITING_INPUT" and wait is not None and wait.kind == "INPUT":
+    if (
+        task.state in {"WAITING_INPUT", "BLOCKED_RULE"}
+        and wait is not None
+        and wait.kind == "INPUT"
+    ):
         available_actions.extend(("INPUT", "EDIT_DRAFT"))
-    if task.state == "WAITING_APPROVAL" and wait is not None and wait.kind == "APPROVAL":
+    if (
+        task.state == "WAITING_APPROVAL"
+        and wait is not None
+        and wait.kind == "APPROVAL"
+    ):
         available_actions.extend(("APPROVE", "RETURN", "REJECT"))
+    order = await session.scalar(select(Order).where(Order.task_id == task.id))
     return {
         "data": {
             "task_id": str(task.id),
@@ -511,8 +521,20 @@ async def get_task(
                 if latest_approval is not None
                 else None
             ),
-            # 当前订单表尚未绑定 task_id；后续订单提交流程建立关联后再投影。
-            "order_ref": None,
+            "order_ref": (
+                {
+                    "order_id": str(order.id),
+                    "order_number": order.number,
+                    "state": order.state,
+                    "total_amount": str(order.total_amount),
+                    "currency": order.currency,
+                    "approval_id": str(order.approval_id),
+                    "approved_version": order.approved_version,
+                    "approved_content_hash": order.approved_content_hash,
+                }
+                if order is not None
+                else None
+            ),
             "last_error": task.last_error,
             "available_actions": available_actions,
             "created_at": task.created_at.isoformat(),
@@ -568,7 +590,7 @@ async def submit_task_input(
             "request_id": request_id(request),
         }
 
-    if task.state != "WAITING_INPUT":
+    if task.state not in {"WAITING_INPUT", "BLOCKED_RULE"}:
         raise _api_error(409, "TASK_NOT_WAITING", "任务当前不等待输入")
     wait = await session.scalar(
         select(TaskWait)
@@ -651,17 +673,22 @@ async def review_task(
     )
     if existing is not None:
         if existing.kind != "REVIEW" or existing.state == "SUPERSEDED":
-            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "审批请求已失效或幂等键已用于其他操作")
-        if any(
-            existing.payload.get(field) != value
-            for field, value in {
-                "decision": body.decision,
-                "comment": body.reason,
-                "content_hash": body.content_hash,
-                "checkpoint_id": body.checkpoint_id,
-                "interrupt_id": body.interrupt_id,
-            }.items()
-        ) or existing.expected_version != body.draft_version:
+            raise _api_error(
+                409, "IDEMPOTENCY_CONFLICT", "审批请求已失效或幂等键已用于其他操作"
+            )
+        if (
+            any(
+                existing.payload.get(field) != value
+                for field, value in {
+                    "decision": body.decision,
+                    "comment": body.reason,
+                    "content_hash": body.content_hash,
+                    "checkpoint_id": body.checkpoint_id,
+                    "interrupt_id": body.interrupt_id,
+                }.items()
+            )
+            or existing.expected_version != body.draft_version
+        ):
             raise _api_error(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同的审批决定")
         try:
             command = await enqueue_command(
@@ -707,7 +734,9 @@ async def review_task(
         or wait.draft_version != body.draft_version
         or wait.payload.get("content_hash") != body.content_hash
     ):
-        raise _api_error(409, "VERSION_CONFLICT", "审批等待点或草稿版本已变化，请刷新任务")
+        raise _api_error(
+            409, "VERSION_CONFLICT", "审批等待点或草稿版本已变化，请刷新任务"
+        )
 
     draft = await session.scalar(
         select(Draft).where(Draft.task_id == task.id).with_for_update()
@@ -720,10 +749,14 @@ async def review_task(
         or snapshot.version != body.draft_version
         or snapshot.content_hash != body.content_hash
     ):
-        raise _api_error(409, "VERSION_CONFLICT", "草稿版本或内容摘要已变化，请刷新任务")
+        raise _api_error(
+            409, "VERSION_CONFLICT", "草稿版本或内容摘要已变化，请刷新任务"
+        )
     if body.decision == "APPROVE":
         if not snapshot.is_validated or snapshot.candidate is None:
-            raise _api_error(422, "APPROVAL_BLOCKED", "草稿存在缺失字段或校验问题，不能批准")
+            raise _api_error(
+                422, "APPROVAL_BLOCKED", "草稿存在缺失字段或校验问题，不能批准"
+            )
         try:
             precheck = await precheck_candidate(
                 session,
@@ -732,9 +765,13 @@ async def review_task(
                 business_date=datetime.now(ZoneInfo(settings.business_timezone)).date(),
             )
         except ValueError as exc:
-            raise _api_error(422, "APPROVAL_BLOCKED", "草稿缺少合同或无法通过业务规则预检") from exc
+            raise _api_error(
+                422, "APPROVAL_BLOCKED", "草稿缺少合同或无法通过业务规则预检"
+            ) from exc
         if precheck.issues:
-            raise _api_error(422, "APPROVAL_BLOCKED", "草稿存在合同、物料或额度规则问题，不能批准")
+            raise _api_error(
+                422, "APPROVAL_BLOCKED", "草稿存在合同、物料或额度规则问题，不能批准"
+            )
 
     payload["draft_id"] = str(draft.id)
     try:
@@ -793,9 +830,13 @@ async def review_task(
                 "command_id": str(command.command_id),
             },
         )
+    if approval.decision == "APPROVE" and approval.invalidated_at is None:
+        draft.lock_state = "SUBMITTING"
     await session.commit()
     return {
-        **_review_accepted_response(task.id, approval.id, command.command_id, state="QUEUED"),
+        **_review_accepted_response(
+            task.id, approval.id, command.command_id, state="QUEUED"
+        ),
         "request_id": request_id(request),
     }
 
@@ -879,17 +920,27 @@ async def patch_task_draft(
             return {"data": existing.result_ref, "request_id": request_id(request)}
         raise _api_error(409, "IDEMPOTENCY_CONFLICT", "草稿修改请求结果不可回查")
 
-    if task.state not in {"WAITING_INPUT", "QUEUED"}:
+    if task.state not in {"WAITING_INPUT", "BLOCKED_RULE", "QUEUED"}:
         raise _api_error(409, "TASK_NOT_WAITING", "当前任务不允许修改草稿")
     wait = await session.scalar(
         select(TaskWait)
         .where(TaskWait.task_id == task.id, TaskWait.active)
         .with_for_update()
     )
-    if wait is None or wait.checkpoint_ref != body.checkpoint_id or wait.interrupt_id != body.interrupt_id:
+    if (
+        wait is None
+        or wait.checkpoint_ref != body.checkpoint_id
+        or wait.interrupt_id != body.interrupt_id
+    ):
         raise _api_error(409, "WAIT_CONFLICT", "任务等待点已变化，请刷新任务")
-    is_input_wait = task.state == "WAITING_INPUT" and wait.kind == "INPUT"
-    is_pending_review = task.state == "QUEUED" and wait.kind == "APPROVAL" and wait.pending_command_id is not None
+    is_input_wait = (
+        task.state in {"WAITING_INPUT", "BLOCKED_RULE"} and wait.kind == "INPUT"
+    )
+    is_pending_review = (
+        task.state == "QUEUED"
+        and wait.kind == "APPROVAL"
+        and wait.pending_command_id is not None
+    )
     if not (is_input_wait or is_pending_review):
         raise _api_error(409, "TASK_NOT_WAITING", "当前任务不允许修改草稿")
 
@@ -900,7 +951,10 @@ async def patch_task_draft(
         )
         pending_job = await session.scalar(
             select(TaskJob)
-            .where(TaskJob.command_id == wait.pending_command_id, TaskJob.kind == "RUN_TASK")
+            .where(
+                TaskJob.command_id == wait.pending_command_id,
+                TaskJob.kind == "RUN_TASK",
+            )
             .with_for_update()
         )
         if (
@@ -929,7 +983,9 @@ async def patch_task_draft(
         assert pending_job is not None
         pending_job.state = "DONE"
         pending_approval = await session.scalar(
-            select(TaskApproval).where(TaskApproval.command_id == pending_command.id).with_for_update()
+            select(TaskApproval)
+            .where(TaskApproval.command_id == pending_command.id)
+            .with_for_update()
         )
         if pending_approval is not None and pending_approval.invalidated_at is None:
             pending_approval.invalidated_at = datetime.now(UTC)
@@ -1011,7 +1067,9 @@ async def patch_task_draft(
         payload={
             "version": saved.version,
             "content_hash": saved.content_hash,
-            "superseded_command_id": str(pending_command.id) if pending_command else None,
+            "superseded_command_id": str(pending_command.id)
+            if pending_command
+            else None,
         },
     )
     await session.commit()

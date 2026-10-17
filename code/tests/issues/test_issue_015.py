@@ -48,9 +48,20 @@ _HASH = hashlib.sha256(b"issue-015-draft").hexdigest()
 
 
 class _ReviewServices:
-    def __init__(self, decision: str, *, reviewable: bool = True) -> None:
+    def __init__(
+        self,
+        decision: str,
+        *,
+        reviewable: bool = True,
+        commit_result: dict[str, object] | None = None,
+    ) -> None:
         self.decision = decision
         self.reviewable = reviewable
+        self.commit_result = commit_result or {
+            "state": "COMPLETED",
+            "order_id": "00000000-0000-4000-8000-000000000016",
+            "order_number": "XSDD-TEST-20261017-001",
+        }
         self.executed_versions: list[int | None] = []
 
     async def execute_tools(self, state):
@@ -71,7 +82,9 @@ class _ReviewServices:
             "draft_version": state["draft_version"],
             "content_hash": _HASH,
             "reviewable": self.reviewable,
-            "issues": [] if self.reviewable else [{"field": "contract_id", "message": "合同无效"}],
+            "issues": []
+            if self.reviewable
+            else [{"field": "contract_id", "message": "合同无效"}],
         }
 
     async def load_resume_command(self, command_id: UUID, *, state):
@@ -100,6 +113,9 @@ class _ReviewServices:
             "content_hash": _HASH,
             "comment": "请补充并确认交付信息",
         }
+
+    async def commit_order(self, state):
+        return self.commit_result
 
 
 async def _start_graph_wait(services: _ReviewServices):
@@ -139,7 +155,7 @@ async def test_graph_persists_a_real_version_bound_review_interrupt() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("decision", "expected_state"),
-    [("APPROVE", "SUBMITTING"), ("RETURN", "WAITING_INPUT"), ("REJECT", "REJECTED")],
+    [("APPROVE", "COMPLETED"), ("RETURN", "WAITING_INPUT"), ("REJECT", "REJECTED")],
 )
 async def test_review_decisions_resume_to_their_specified_state(
     decision: str, expected_state: str
@@ -168,7 +184,40 @@ async def test_review_decisions_resume_to_their_specified_state(
 
 
 @pytest.mark.asyncio
-async def test_edit_replaces_pending_approval_and_reenters_review_with_new_version() -> None:
+async def test_live_rule_block_reinterrupts_for_correction_with_blocked_projection() -> (
+    None
+):
+    reason = "合同剩余额度不足，请调整金额后重新审批"
+    services = _ReviewServices(
+        "APPROVE",
+        commit_result={
+            "state": "BLOCKED_RULE",
+            "code": "CONTRACT_AMOUNT_EXCEEDED",
+            "reason": reason,
+        },
+    )
+    graph, task_id, wait = await _start_graph_wait(services)
+
+    result = await resume_task_graph(
+        graph,
+        task_id=task_id,
+        command_id=uuid4(),
+        checkpoint_id=wait["checkpoint_id"],
+        interrupt_id=wait["interrupt_id"],
+        graph_version=GRAPH_VERSION,
+    )
+    next_wait = wait_details(await graph.aget_state(task_graph_config(task_id)))
+
+    assert result["projection_state"] == "BLOCKED_RULE"
+    assert next_wait is not None and next_wait["kind"] == "input"
+    assert next_wait["projection_state"] == "BLOCKED_RULE"
+    assert next_wait["reason"] == reason
+
+
+@pytest.mark.asyncio
+async def test_edit_replaces_pending_approval_and_reenters_review_with_new_version() -> (
+    None
+):
     services = _ReviewServices("EDIT")
     graph, task_id, old_wait = await _start_graph_wait(services)
 
@@ -250,7 +299,9 @@ async def _create_review_wait(
             checkpoint_ref=checkpoint_id,
         )
         session.add(task)
-        draft = Draft(id=draft_id, task_id=task_id, current_version=0, lock_state="EDITABLE")
+        draft = Draft(
+            id=draft_id, task_id=task_id, current_version=0, lock_state="EDITABLE"
+        )
         session.add(draft)
         await session.flush()
         candidate = _candidate(quantity=quantity)
@@ -318,7 +369,9 @@ def _headers(identity: dict[str, object], key: str) -> dict[str, str]:
     }
 
 
-def _review_body(wait: dict[str, object], *, decision: str = "APPROVE") -> dict[str, object]:
+def _review_body(
+    wait: dict[str, object], *, decision: str = "APPROVE"
+) -> dict[str, object]:
     return {
         "decision": decision,
         "draft_version": wait["draft_version"],
@@ -374,8 +427,13 @@ async def test_review_api_binds_identity_version_and_idempotent_command() -> Non
             json=body,
         )
         assert replay.status_code == 202, replay.text
-        assert replay.json()["data"]["approval_id"] == accepted.json()["data"]["approval_id"]
-        assert replay.json()["data"]["command_id"] == accepted.json()["data"]["command_id"]
+        assert (
+            replay.json()["data"]["approval_id"]
+            == accepted.json()["data"]["approval_id"]
+        )
+        assert (
+            replay.json()["data"]["command_id"] == accepted.json()["data"]["command_id"]
+        )
 
     async with async_session_factory() as session:
         approval_id = UUID(accepted.json()["data"]["approval_id"])
@@ -386,16 +444,29 @@ async def test_review_api_binds_identity_version_and_idempotent_command() -> Non
             select(TaskWait).where(TaskWait.task_id == wait["task_id"], TaskWait.active)
         )
         command_count = await session.scalar(
-            select(func.count()).select_from(TaskCommand).where(TaskCommand.task_id == wait["task_id"])
+            select(func.count())
+            .select_from(TaskCommand)
+            .where(TaskCommand.task_id == wait["task_id"])
         )
         job_count = await session.scalar(
-            select(func.count()).select_from(TaskJob).where(TaskJob.command_id == command_id)
+            select(func.count())
+            .select_from(TaskJob)
+            .where(TaskJob.command_id == command_id)
         )
     assert approval is not None and approval.actor_id == _NORTH_APPROVER
     assert approval.department_id == _NORTH_DEPT
-    assert approval.version == wait["draft_version"] and approval.content_hash == wait["content_hash"]
-    assert command is not None and command.kind == "REVIEW" and command.expected_version == wait["draft_version"]
-    assert wait_projection is not None and wait_projection.pending_command_id == command_id
+    assert (
+        approval.version == wait["draft_version"]
+        and approval.content_hash == wait["content_hash"]
+    )
+    assert (
+        command is not None
+        and command.kind == "REVIEW"
+        and command.expected_version == wait["draft_version"]
+    )
+    assert (
+        wait_projection is not None and wait_projection.pending_command_id == command_id
+    )
     assert command_count == 1 and job_count == 1
     assert await _order_count() == before_orders
     async with async_session_factory() as session, session.begin():
@@ -522,7 +593,9 @@ async def test_pending_approval_is_invalidated_and_replaced_by_draft_edit() -> N
         task_commands = list(
             (
                 await session.scalars(
-                    select(TaskCommand).where(TaskCommand.task_id == wait_data["task_id"])
+                    select(TaskCommand).where(
+                        TaskCommand.task_id == wait_data["task_id"]
+                    )
                 )
             ).all()
         )
@@ -530,11 +603,17 @@ async def test_pending_approval_is_invalidated_and_replaced_by_draft_edit() -> N
             select(TaskApproval).where(TaskApproval.task_id == wait_data["task_id"])
         )
         active_wait = await session.scalar(
-            select(TaskWait).where(TaskWait.task_id == wait_data["task_id"], TaskWait.active)
+            select(TaskWait).where(
+                TaskWait.task_id == wait_data["task_id"], TaskWait.active
+            )
         )
         draft = await session.get(Draft, wait_data["draft_id"])
         pending_id = active_wait.pending_command_id if active_wait is not None else None
-        pending = await session.get(TaskCommand, pending_id) if pending_id is not None else None
+        pending = (
+            await session.get(TaskCommand, pending_id)
+            if pending_id is not None
+            else None
+        )
     original = next(item for item in task_commands if item.kind == "REVIEW")
     replacement = next(item for item in task_commands if item.kind == "INPUT")
     async with async_session_factory() as session:
@@ -546,8 +625,15 @@ async def test_pending_approval_is_invalidated_and_replaced_by_draft_edit() -> N
     assert approval is not None and approval.invalidated_at is not None
     assert draft is not None and draft.current_version == 2
     assert active_wait is not None and active_wait.kind == "APPROVAL"
-    assert active_wait.draft_version == 2 and active_wait.payload["content_hash"] != wait_data["content_hash"]
-    assert pending is not None and pending.id == replacement.id and pending.expected_version == 2
+    assert (
+        active_wait.draft_version == 2
+        and active_wait.payload["content_hash"] != wait_data["content_hash"]
+    )
+    assert (
+        pending is not None
+        and pending.id == replacement.id
+        and pending.expected_version == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -569,12 +655,22 @@ async def test_missing_fields_and_over_quota_drafts_cannot_be_approved(
     assert blocked.status_code == 422
     assert blocked.json()["error"]["code"] == "APPROVAL_BLOCKED"
     async with async_session_factory() as session:
-        assert await session.scalar(
-            select(func.count()).select_from(TaskApproval).where(TaskApproval.task_id == wait["task_id"])
-        ) == 0
-        assert await session.scalar(
-            select(func.count()).select_from(TaskCommand).where(TaskCommand.task_id == wait["task_id"])
-        ) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(TaskApproval)
+                .where(TaskApproval.task_id == wait["task_id"])
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(TaskCommand)
+                .where(TaskCommand.task_id == wait["task_id"])
+            )
+            == 0
+        )
 
 
 async def _order_count() -> int:

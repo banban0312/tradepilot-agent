@@ -38,6 +38,7 @@ from app.models import (
     UserDepartmentScope,
     UserRole,
 )
+from app.orders.commit import commit_approved_order
 from app.tasks.checkpointer import EpochFencedPostgresSaver
 from app.tasks.service import TaskExecutionLease
 from app.tasks.waits import (
@@ -112,7 +113,9 @@ class DatabaseWorkflowServices:
                     session,
                     candidate=snapshot.candidate,
                     actor=self.actor,
-                    business_date=datetime.now(ZoneInfo(self.config.business_timezone)).date(),
+                    business_date=datetime.now(
+                        ZoneInfo(self.config.business_timezone)
+                    ).date(),
                 )
                 issues.extend(precheck.issues)
             return {
@@ -139,7 +142,9 @@ class DatabaseWorkflowServices:
                     session,
                     candidate=snapshot.candidate,
                     actor=self.actor,
-                    business_date=datetime.now(ZoneInfo(self.config.business_timezone)).date(),
+                    business_date=datetime.now(
+                        ZoneInfo(self.config.business_timezone)
+                    ).date(),
                 )
                 issues.extend(precheck.issues)
             return {
@@ -159,7 +164,9 @@ class DatabaseWorkflowServices:
         async with self.session_factory() as session:
             command = await session.get(TaskCommand, command_id)
             wait = await session.scalar(
-                select(TaskWait).where(TaskWait.task_id == self.task.id, TaskWait.active)
+                select(TaskWait).where(
+                    TaskWait.task_id == self.task.id, TaskWait.active
+                )
             )
             if (
                 command is None
@@ -172,7 +179,10 @@ class DatabaseWorkflowServices:
                 or command.expected_version != wait.draft_version
             ):
                 raise WorkflowResumeConflict("审批或编辑命令与当前等待版本不匹配")
-            if command.kind == "INPUT" and command.payload.get("operation") == "DRAFT_PATCH":
+            if (
+                command.kind == "INPUT"
+                and command.payload.get("operation") == "DRAFT_PATCH"
+            ):
                 text = command.payload.get("text")
                 if not isinstance(text, str) or not text.strip():
                     raise WorkflowResumeConflict("草稿修改命令缺少有效说明")
@@ -188,9 +198,12 @@ class DatabaseWorkflowServices:
             approval = await session.scalar(
                 select(TaskApproval).where(TaskApproval.command_id == command.id)
             )
+            blocked_replay = bool(
+                command.result_ref and command.result_ref.get("state") == "BLOCKED_RULE"
+            )
             if (
                 approval is None
-                or approval.invalidated_at is not None
+                or (approval.invalidated_at is not None and not blocked_replay)
                 or approval.task_id != self.task.id
                 or str(approval.draft_id) != wait.payload.get("draft_id")
                 or approval.version != wait.draft_version
@@ -214,26 +227,36 @@ class DatabaseWorkflowServices:
                 or snapshot.content_hash != approval.content_hash
             ):
                 raise WorkflowResumeConflict("审批草稿已修改或不再满足校验条件")
-            if approval.decision == "APPROVE":
-                if not snapshot.is_validated or snapshot.candidate is None:
-                    raise WorkflowResumeConflict("审批草稿已修改或不再满足校验条件")
-                result = await precheck_candidate(
-                    session,
-                    candidate=snapshot.candidate,
-                    actor=self.actor,
-                    business_date=datetime.now(ZoneInfo(self.config.business_timezone)).date(),
-                )
-                if result.issues:
-                    raise WorkflowResumeConflict("审批后业务规则或合同额度已变化")
             return {
                 "id": str(command.id),
                 "decision": approval.decision,
                 "actor_id": str(approval.actor_id),
+                "approval_id": str(approval.id),
                 "draft_id": str(approval.draft_id),
                 "expected_version": approval.version,
                 "content_hash": approval.content_hash,
                 "comment": approval.comment,
             }
+
+    async def commit_order(self, state: WorkflowState) -> Mapping[str, Any]:
+        """提交只接受图中恢复出的人工批准 ID，不接受模型或请求正文提供的订单参数。"""
+        resumed = state.get("resume_command")
+        if not isinstance(resumed, Mapping):
+            raise WorkflowResumeConflict("订单提交缺少人工审批命令")
+        try:
+            command_id = UUID(str(resumed.get("id")))
+            approval_id = UUID(str(resumed.get("approval_id")))
+        except (ValueError, TypeError) as exc:
+            raise WorkflowResumeConflict("订单提交缺少有效审批标识") from exc
+        async with self.lease.write_session() as session:
+            result = await commit_approved_order(
+                session,
+                task_id=self.task.id,
+                command_id=command_id,
+                approval_id=approval_id,
+                config=self.config,
+            )
+            return result.as_dict()
 
     async def load_resume_command(
         self, command_id: UUID, *, state: WorkflowState
