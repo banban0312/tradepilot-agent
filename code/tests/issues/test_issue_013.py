@@ -50,6 +50,7 @@ class FixedWorkflowServices:
             "exists": True,
             "draft_id": state["draft_id"],
             "draft_version": state["draft_version"],
+            "content_hash": "a" * 64,
             "reviewable": True,
         }
 
@@ -363,8 +364,13 @@ async def test_postgres_checkpoint_and_new_worker_resume_same_task_after_reconne
             ).all()
         )
         task_projection = await session.get(AgentTask, task_id)
-        assert len(waits) == 1 and not waits[0].active
-        assert waits[0].consumed_command_id == resume.command_id
+        previous_wait = next(wait for wait in waits if wait.interrupt_id == details["interrupt_id"])
+        approval_wait = next(wait for wait in waits if wait.interrupt_id != details["interrupt_id"])
+        assert len(waits) == 2
+        assert not previous_wait.active
+        assert previous_wait.consumed_command_id == resume.command_id
+        assert approval_wait.active and approval_wait.kind == "APPROVAL"
+        assert approval_wait.payload["content_hash"] == "a" * 64
         assert (
             task_projection is not None and task_projection.state == "WAITING_APPROVAL"
         )

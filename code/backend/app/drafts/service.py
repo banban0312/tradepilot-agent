@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import BUSINESS_OPERATOR, AuthContext, require_role
-from app.models import Draft, DraftItem, DraftRevision, FieldEvidence
+from app.models import Draft, DraftItem, DraftRevision, FieldEvidence, TaskApproval
 from app.observability.service import append_task_event
 
 from .types import (
@@ -219,6 +219,20 @@ async def save_candidate(
             )
         )
     draft.current_version = next_version
+    if draft.task_id is not None:
+        # Any changed business content invalidates prior approvals in the same transaction.
+        from datetime import UTC, datetime
+
+        approvals = await session.scalars(
+            select(TaskApproval).where(
+                TaskApproval.draft_id == draft.id,
+                TaskApproval.decision == "APPROVE",
+                TaskApproval.invalidated_at.is_(None),
+            ).with_for_update()
+        )
+        now = datetime.now(UTC)
+        for approval in approvals:
+            approval.invalidated_at = now
     await session.flush()
     if draft.task_id is not None:
         await append_task_event(

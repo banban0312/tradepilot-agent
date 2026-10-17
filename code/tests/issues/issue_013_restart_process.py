@@ -47,6 +47,7 @@ class RestartServices:
             "exists": True,
             "draft_id": state["draft_id"],
             "draft_version": state["draft_version"],
+            "content_hash": "a" * 64,
             "reviewable": True,
         }
 

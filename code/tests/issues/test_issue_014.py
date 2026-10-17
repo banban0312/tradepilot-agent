@@ -10,6 +10,9 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy import delete, func, select
+
 from app.agent.workflow import (
     GRAPH_VERSION,
     build_task_graph,
@@ -34,8 +37,6 @@ from app.models import (
 from app.observability.service import append_task_event, finish_span, start_span
 from app.tasks.routes import _decode_cursor, _encode_cursor, _sse
 from app.worker.workflow import DatabaseWorkflowServices
-from langgraph.checkpoint.memory import InMemorySaver
-from sqlalchemy import delete, func, select
 
 _NORTH_USER = UUID("00000000-0000-4000-8000-000000000100")
 _NORTH_DEPT = UUID("00000000-0000-4000-8000-000000000001")
@@ -70,6 +71,7 @@ class _DraftPatchResumeServices:
             "exists": True,
             "draft_id": state["draft_id"],
             "draft_version": state["draft_version"],
+            "content_hash": "a" * 64,
             "reviewable": True,
         }
 

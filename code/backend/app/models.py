@@ -138,7 +138,7 @@ class AgentTask(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("task_type IN ('SALES', 'PURCHASE')", name="ck_agent_tasks_type"),
         CheckConstraint(
-            "state IN ('QUEUED', 'RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'BLOCKED_RULE', 'FAILED', 'COMPLETED', 'REJECTED')",
+            "state IN ('QUEUED', 'RUNNING', 'WAITING_INPUT', 'WAITING_APPROVAL', 'SUBMITTING', 'BLOCKED_RULE', 'FAILED', 'COMPLETED', 'REJECTED')",
             name="ck_agent_tasks_state",
         ),
         CheckConstraint("execution_epoch >= 0", name="ck_agent_tasks_epoch_nonnegative"),
@@ -248,6 +248,39 @@ class TaskWait(Base):
     pending_command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     consumed_command_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TaskApproval(Base):
+    """不可变人工决定；有效性由当前草稿版本与 invalidated_at 共同约束。"""
+
+    __tablename__ = "task_approvals"
+    __table_args__ = (
+        CheckConstraint("decision IN ('APPROVE', 'RETURN', 'REJECT')", name="ck_task_approvals_decision"),
+        CheckConstraint("version > 0", name="ck_task_approvals_version_positive"),
+        ForeignKeyConstraint(["task_id"], ["agent_tasks.id"], name="fk_task_approvals_task", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["command_id"], ["task_commands.id"], name="fk_task_approvals_command", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["draft_id"], ["drafts.id"], name="fk_task_approvals_draft", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["actor_id"], ["users.id"], name="fk_task_approvals_actor", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["department_id"], ["departments.id"], name="fk_task_approvals_department", ondelete="RESTRICT"),
+        UniqueConstraint("command_id", name="uq_task_approvals_command"),
+        Index("ix_task_approvals_task_created", "task_id", "created_at"),
+        Index("ix_task_approvals_draft_version", "draft_id", "version"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    task_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    command_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    draft_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    actor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    checkpoint_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    interrupt_id: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
