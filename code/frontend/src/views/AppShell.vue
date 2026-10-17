@@ -19,6 +19,7 @@ const roleText = computed(() => identity.value?.roles.map((role) => roleLabels[r
 const userInitial = computed(() => identity.value?.login.slice(0, 1).toUpperCase() ?? 'U')
 const pageTitle = computed(() => {
   if (route.name === 'task-workbench') return '全屏工作台'
+  if (route.name === 'order-center') return '订单中心'
   if (route.name === 'interface-states') return '界面状态与异常反馈'
   if (route.name === 'master-data') return '主数据与配置'
   return '开始一笔新订单'
@@ -26,7 +27,7 @@ const pageTitle = computed(() => {
 
 const navigationItems = [
   { label: '智能提单', icon: 'sparkles', route: 'workbench' },
-  { label: '订单中心', icon: 'file' },
+  { label: '订单中心', icon: 'file', route: 'order-center' },
   { label: '批量导入', icon: 'grid' },
   { label: '任务追踪', icon: 'trace' },
   { label: '评测中心', icon: 'chart' },
