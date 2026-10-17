@@ -29,6 +29,7 @@ from app.models import (
     Material,
     MaterialAlias,
     Order,
+    OrderItem,
     QuotaOccupation,
     TaskApproval,
     TaskCommand,
@@ -52,6 +53,92 @@ async def _login(client: httpx.AsyncClient, login: str) -> dict[str, object]:
     )
     assert response.status_code == 200, response.text
     return response.json()["data"]
+
+
+async def _create_approved_submission(
+    candidate: CandidateOrder, *, title: str
+) -> tuple[UUID, UUID, UUID, UUID]:
+    task_id, session_id, draft_id = uuid4(), uuid4(), uuid4()
+    command_id, approval_id = uuid4(), uuid4()
+    checkpoint_id, interrupt_id = f"m3-06-{uuid4()}", f"m3-06-{uuid4()}"
+    operator = AuthContext(
+        user_id=NORTH_OPERATOR,
+        login="demo-operator-north",
+        roles=frozenset({BUSINESS_OPERATOR}),
+        department_ids=frozenset({NORTH}),
+    )
+
+    async with async_session_factory() as session, session.begin():
+        session.add(TaskSession(id=session_id, owner_id=NORTH_OPERATOR, title=title))
+        await session.flush()
+        session.add(
+            AgentTask(
+                id=task_id,
+                session_id=session_id,
+                owner_id=NORTH_OPERATOR,
+                department_id=NORTH,
+                task_type="SALES",
+                state="SUBMITTING",
+                current_step="commit_order",
+                checkpoint_ref=checkpoint_id,
+            )
+        )
+        session.add(
+            Draft(
+                id=draft_id,
+                task_id=task_id,
+                current_version=0,
+                lock_state="EDITABLE",
+            )
+        )
+        await session.flush()
+        saved = await save_candidate(
+            session,
+            draft_id=draft_id,
+            expected_version=0,
+            candidate=candidate,
+            actor=operator,
+        )
+        payload = {
+            "decision": "APPROVE",
+            "draft_id": str(draft_id),
+            "content_hash": saved.content_hash,
+            "checkpoint_id": checkpoint_id,
+            "interrupt_id": interrupt_id,
+        }
+        command = TaskCommand(
+            id=command_id,
+            task_id=task_id,
+            actor_id=UUID("00000000-0000-4000-8000-000000000102"),
+            kind="REVIEW",
+            payload=payload,
+            expected_version=saved.version,
+            target_interrupt_id=interrupt_id,
+            request_id=f"issue020-{uuid4()}",
+            payload_hash="a" * 64,
+        )
+        session.add(command)
+        await session.flush()
+        session.add(
+            TaskApproval(
+                id=approval_id,
+                task_id=task_id,
+                command_id=command_id,
+                draft_id=draft_id,
+                actor_id=command.actor_id,
+                department_id=NORTH,
+                version=saved.version,
+                content_hash=saved.content_hash,
+                checkpoint_ref=checkpoint_id,
+                interrupt_id=interrupt_id,
+                decision="APPROVE",
+            )
+        )
+        draft = await session.get(Draft, draft_id)
+        assert draft is not None
+        draft.lock_state = "SUBMITTING"
+
+    return task_id, draft_id, command_id, approval_id
 
 
 @pytest.mark.asyncio
@@ -187,6 +274,11 @@ async def test_master_data_permissions_contract_rules_and_alias_audit() -> None:
             },
         )
         assert forged_balance.status_code == 422
+        unsupported_currency = await admin.patch(
+            f"/api/v1/admin/contracts/{contract['id']}",
+            json={"expected_version": contract["version"], "currency": "USD"},
+        )
+        assert unsupported_currency.status_code == 422
 
         async with async_session_factory() as session:
             balance = await session.get(ContractBalance, NORTH_CONTRACT)
@@ -237,7 +329,8 @@ async def test_master_data_permissions_contract_rules_and_alias_audit() -> None:
             denied = await operator.get("/api/v1/admin/contracts")
             assert denied.status_code == 403
 
-        marker = f"TP-验证别名-{uuid4().hex}"
+        # 数字化 UUID 避免匹配器把随机字母数字片段误认为规格型号。
+        marker = f"TP-验证别名-{uuid4().int}"
         created_ids: list[str] = []
         snapshot_draft_id = uuid4()
         try:
@@ -390,9 +483,6 @@ async def test_inactivated_contract_is_blocked_inside_final_order_transaction() 
     if os.getenv("TRADEPILOT_TEST_MODE") != "1":
         pytest.skip("需由 verify_issue_020.ps1 在隔离 PostgreSQL Compose 环境执行")
 
-    task_id, session_id, draft_id = uuid4(), uuid4(), uuid4()
-    command_id, approval_id = uuid4(), uuid4()
-    checkpoint_id, interrupt_id = f"m3-06-{uuid4()}", f"m3-06-{uuid4()}"
     candidate = CandidateOrder(
         order_type="SALES",
         contract_id=NORTH_CONTRACT,
@@ -412,82 +502,9 @@ async def test_inactivated_contract_is_blocked_inside_final_order_transaction() 
             ),
         ),
     )
-    operator = AuthContext(
-        user_id=NORTH_OPERATOR,
-        login="demo-operator-north",
-        roles=frozenset({BUSINESS_OPERATOR}),
-        department_ids=frozenset({NORTH}),
+    task_id, draft_id, command_id, approval_id = await _create_approved_submission(
+        candidate, title="AC-18 停用合同阻断"
     )
-
-    async with async_session_factory() as session, session.begin():
-        session.add(TaskSession(id=session_id, owner_id=NORTH_OPERATOR, title="AC-18"))
-        await session.flush()
-        session.add(
-            AgentTask(
-                id=task_id,
-                session_id=session_id,
-                owner_id=NORTH_OPERATOR,
-                department_id=NORTH,
-                task_type="SALES",
-                state="SUBMITTING",
-                current_step="commit_order",
-                checkpoint_ref=checkpoint_id,
-            )
-        )
-        session.add(
-            Draft(
-                id=draft_id,
-                task_id=task_id,
-                current_version=0,
-                lock_state="EDITABLE",
-            )
-        )
-        await session.flush()
-        saved = await save_candidate(
-            session,
-            draft_id=draft_id,
-            expected_version=0,
-            candidate=candidate,
-            actor=operator,
-        )
-        payload = {
-            "decision": "APPROVE",
-            "draft_id": str(draft_id),
-            "content_hash": saved.content_hash,
-            "checkpoint_id": checkpoint_id,
-            "interrupt_id": interrupt_id,
-        }
-        command = TaskCommand(
-            id=command_id,
-            task_id=task_id,
-            actor_id=UUID("00000000-0000-4000-8000-000000000102"),
-            kind="REVIEW",
-            payload=payload,
-            expected_version=saved.version,
-            target_interrupt_id=interrupt_id,
-            request_id=f"issue020-{uuid4()}",
-            payload_hash="a" * 64,
-        )
-        session.add(command)
-        await session.flush()
-        session.add(
-            TaskApproval(
-                id=approval_id,
-                task_id=task_id,
-                command_id=command_id,
-                draft_id=draft_id,
-                actor_id=command.actor_id,
-                department_id=NORTH,
-                version=saved.version,
-                content_hash=saved.content_hash,
-                checkpoint_ref=checkpoint_id,
-                interrupt_id=interrupt_id,
-                decision="APPROVE",
-            )
-        )
-        draft = await session.get(Draft, draft_id)
-        assert draft is not None
-        draft.lock_state = "SUBMITTING"
 
     try:
         async with async_session_factory() as session, session.begin():
@@ -527,3 +544,165 @@ async def test_inactivated_contract_is_blocked_inside_final_order_transaction() 
             contract = await session.get(Contract, NORTH_CONTRACT)
             assert contract is not None
             contract.status = "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_formal_order_snapshot_survives_master_material_update() -> None:
+    if os.getenv("TRADEPILOT_TEST_MODE") != "1":
+        pytest.skip("需由 verify_issue_020.ps1 在隔离 PostgreSQL Compose 环境执行")
+    assert os.getenv("DEMO_MODE", "").casefold() == "true"
+    assert os.getenv("DEMO_PASSWORD")
+
+    material_id = UUID("00000000-0000-4000-8000-000000000030")
+    candidate = CandidateOrder(
+        order_type="SALES",
+        contract_id=NORTH_CONTRACT,
+        customer_id=UUID("00000000-0000-4000-8000-000000000010"),
+        project_id=UUID("00000000-0000-4000-8000-000000000020"),
+        delivery_date=date.today(),
+        address="北京市朝阳区示例工地",
+        contact="张先生",
+        items=(
+            CandidateOrderItem(
+                material_id=material_id,
+                raw_name="螺纹钢",
+                specification="HRB400 12mm",
+                quantity=Decimal("2.000000"),
+                unit="吨",
+                unit_price=Decimal("3500.000000"),
+            ),
+        ),
+    )
+    task_id, draft_id, command_id, approval_id = await _create_approved_submission(
+        candidate, title="AC-18 主数据更新后的历史订单快照"
+    )
+
+    async with async_session_factory() as session:
+        material = await session.get(Material, material_id)
+        assert material is not None and material.active
+        original_material = {
+            "name": material.name,
+            "specification": material.specification,
+            "version": material.version,
+        }
+    async with async_session_factory() as session, session.begin():
+        result = await commit_approved_order(
+            session,
+            task_id=task_id,
+            command_id=command_id,
+            approval_id=approval_id,
+        )
+        assert result.state == "COMPLETED"
+        assert result.order_id is not None
+
+    async with async_session_factory() as session:
+        order = await session.scalar(select(Order).where(Order.task_id == task_id))
+        approval = await session.get(TaskApproval, approval_id)
+        assert order is not None and approval is not None
+        revision = await session.get(DraftRevision, (draft_id, order.approved_version))
+        order_item = await session.get(OrderItem, (order.id, 1))
+        draft_item = await session.get(DraftItem, (draft_id, order.approved_version, 1))
+        assert (
+            revision is not None and order_item is not None and draft_item is not None
+        )
+        assert order.approved_version == approval.version == revision.version
+        assert order.approved_content_hash == approval.content_hash
+        assert revision.content_hash == approval.content_hash
+        assert (order_item.raw_name, order_item.specification) == (
+            candidate.items[0].raw_name,
+            candidate.items[0].specification,
+        )
+        assert (draft_item.raw_name, draft_item.specification) == (
+            candidate.items[0].raw_name,
+            candidate.items[0].specification,
+        )
+        approved_snapshot = (
+            order.approved_version,
+            order.approved_content_hash,
+            approval.version,
+            approval.content_hash,
+            revision.version,
+            revision.content_hash,
+            order_item.raw_name,
+            order_item.specification,
+            draft_item.raw_name,
+            draft_item.specification,
+        )
+
+    async with httpx.AsyncClient(base_url=API_URL, timeout=20) as admin:
+        identity = await _login(admin, "demo-admin")
+        admin.headers.update(
+            {
+                "Origin": APP_ORIGIN,
+                "X-CSRF-Token": str(identity["csrf_token"]),
+            }
+        )
+        try:
+            update = await admin.patch(
+                f"/api/v1/admin/materials/{material_id}",
+                json={
+                    "expected_version": original_material["version"],
+                    "name": "已更新的标准物料名称",
+                    "specification": "更新后的标准规格",
+                },
+            )
+            assert update.status_code == 200, update.text
+            updated_material = update.json()["data"]
+            assert updated_material["name"] == "已更新的标准物料名称"
+            assert updated_material["specification"] == "更新后的标准规格"
+            assert updated_material["version"] == original_material["version"] + 1
+
+            async with async_session_factory() as session:
+                order = await session.scalar(
+                    select(Order).where(Order.task_id == task_id)
+                )
+                approval = await session.get(TaskApproval, approval_id)
+                assert order is not None and approval is not None
+                revision = await session.get(
+                    DraftRevision, (draft_id, order.approved_version)
+                )
+                order_item = await session.get(OrderItem, (order.id, 1))
+                draft_item = await session.get(
+                    DraftItem, (draft_id, order.approved_version, 1)
+                )
+                material = await session.get(Material, material_id)
+
+                assert revision is not None
+                assert order_item is not None and draft_item is not None
+                assert material is not None
+                assert (
+                    order.approved_version,
+                    order.approved_content_hash,
+                    approval.version,
+                    approval.content_hash,
+                    revision.version,
+                    revision.content_hash,
+                    order_item.raw_name,
+                    order_item.specification,
+                    draft_item.raw_name,
+                    draft_item.specification,
+                ) == approved_snapshot
+                assert (material.name, material.specification) == (
+                    "已更新的标准物料名称",
+                    "更新后的标准规格",
+                )
+        finally:
+            async with async_session_factory() as session:
+                material = await session.get(Material, material_id)
+                if material is not None and (
+                    material.name != original_material["name"]
+                    or material.specification != original_material["specification"]
+                ):
+                    restore_version = material.version
+                else:
+                    restore_version = None
+            if restore_version is not None:
+                restore = await admin.patch(
+                    f"/api/v1/admin/materials/{material_id}",
+                    json={
+                        "expected_version": restore_version,
+                        "name": original_material["name"],
+                        "specification": original_material["specification"],
+                    },
+                )
+                assert restore.status_code == 200, restore.text

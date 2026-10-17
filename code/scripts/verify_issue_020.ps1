@@ -48,10 +48,10 @@ try {
     & docker @composeArgs up --build --detach --wait mcp web
     if ($LASTEXITCODE -ne 0) { throw "MCP 或前端代理服务启动/健康探针失败，退出码 $LASTEXITCODE。" }
 
-    & docker @composeArgs run --rm --no-deps verify uv run --frozen python -m pytest -q /workspace/tests/issues/test_issue_020.py /workspace/tests/issues/test_issue_003.py /workspace/tests/issues/test_issue_005.py /workspace/tests/issues/test_issue_010.py
+    & docker @composeArgs run --rm --no-deps verify uv run --frozen python -m pytest -q /workspace/tests/issues/test_issue_003.py /workspace/tests/issues/test_issue_005.py /workspace/tests/issues/test_issue_010.py /workspace/tests/issues/test_issue_020.py
     if ($LASTEXITCODE -ne 0) { throw "主数据及合同规则集成验证失败，退出码 $LASTEXITCODE。" }
 
-    Write-Host 'Issue #20 已验证：管理员权限、CSRF、余额只读与总额下限、停用合同预检及最终订单事务阻断、别名歧义、版本冲突和审计均有真实数据库/API 断言。'
+    Write-Host 'Issue #20 已验证：管理员权限、CSRF、余额只读与总额下限、停用合同最终事务阻断、正式订单快照不受物料更新影响、别名歧义、版本冲突和审计均有真实数据库/API 断言。'
 }
 catch {
     Write-Host $_ -ForegroundColor Red

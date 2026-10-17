@@ -429,7 +429,7 @@ onMounted(async () => {
             <label><span>工程项目</span><select v-model="contractForm.project_id" required><option value="" disabled>请选择项目</option><option v-for="project in lookups.projects" :key="project.id" :value="project.id">{{ project.name }}（{{ project.code }}）</option></select></label>
             <div class="master-form__row">
               <label><span>合同总金额</span><input v-model="contractForm.total_amount" inputmode="decimal" pattern="[0-9]+(\.[0-9]{1,2})?" required /></label>
-              <label><span>币种 / 口径</span><select v-model="contractForm.currency"><option value="CNY">CNY / 含税</option><option value="USD">USD</option><option value="HKD">HKD</option></select></label>
+              <label><span>币种 / 口径</span><input value="CNY / 人民币含税" readonly /></label>
             </div>
             <div class="master-form__row">
               <label><span>合同开始日期</span><input v-model="contractForm.valid_from" type="date" required /></label>

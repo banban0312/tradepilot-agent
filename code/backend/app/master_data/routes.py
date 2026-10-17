@@ -73,7 +73,7 @@ class ContractCreate(BaseModel):
     type: Literal["SALES", "PURCHASE"]
     customer_id: UUID
     project_id: UUID
-    currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")] = "CNY"
+    currency: Literal["CNY"] = "CNY"
     total_amount: Decimal = Field(ge=0, max_digits=20, decimal_places=2)
     status: Literal["ACTIVE", "INACTIVE"] = "ACTIVE"
     valid_from: date
@@ -101,7 +101,7 @@ class ContractUpdate(BaseModel):
     type: Literal["SALES", "PURCHASE"] | None = None
     customer_id: UUID | None = None
     project_id: UUID | None = None
-    currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")] | None = None
+    currency: Literal["CNY"] | None = None
     total_amount: Decimal | None = Field(
         default=None, ge=0, max_digits=20, decimal_places=2
     )
