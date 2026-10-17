@@ -14,8 +14,10 @@ from sqlalchemy import select
 from app.auth.context import BUSINESS_OPERATOR, AuthContext
 from app.database import async_session_factory
 from app.drafts.rules import precheck_candidate
-from app.drafts.types import CandidateOrder
+from app.drafts.service import save_candidate
+from app.drafts.types import CandidateOrder, CandidateOrderItem
 from app.models import (
+    AgentTask,
     AuditEvent,
     Contract,
     ContractBalance,
@@ -26,7 +28,13 @@ from app.models import (
     DraftRevision,
     Material,
     MaterialAlias,
+    Order,
+    QuotaOccupation,
+    TaskApproval,
+    TaskCommand,
+    TaskSession,
 )
+from app.orders.commit import commit_approved_order
 
 API_URL = os.getenv("TRADEPILOT_API_URL", "http://api:8000")
 APP_ORIGIN = "http://localhost:5173"
@@ -375,3 +383,147 @@ async def test_master_data_permissions_contract_rules_and_alias_audit() -> None:
                     if material is not None:
                         await session.delete(material)
                 await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_inactivated_contract_is_blocked_inside_final_order_transaction() -> None:
+    if os.getenv("TRADEPILOT_TEST_MODE") != "1":
+        pytest.skip("需由 verify_issue_020.ps1 在隔离 PostgreSQL Compose 环境执行")
+
+    task_id, session_id, draft_id = uuid4(), uuid4(), uuid4()
+    command_id, approval_id = uuid4(), uuid4()
+    checkpoint_id, interrupt_id = f"m3-06-{uuid4()}", f"m3-06-{uuid4()}"
+    candidate = CandidateOrder(
+        order_type="SALES",
+        contract_id=NORTH_CONTRACT,
+        customer_id=UUID("00000000-0000-4000-8000-000000000010"),
+        project_id=UUID("00000000-0000-4000-8000-000000000020"),
+        delivery_date=date.today(),
+        address="北京市朝阳区示例工地",
+        contact="张先生",
+        items=(
+            CandidateOrderItem(
+                material_id=UUID("00000000-0000-4000-8000-000000000030"),
+                raw_name="螺纹钢",
+                specification="HRB400 12mm",
+                quantity=Decimal("2.000000"),
+                unit="吨",
+                unit_price=Decimal("3500.000000"),
+            ),
+        ),
+    )
+    operator = AuthContext(
+        user_id=NORTH_OPERATOR,
+        login="demo-operator-north",
+        roles=frozenset({BUSINESS_OPERATOR}),
+        department_ids=frozenset({NORTH}),
+    )
+
+    async with async_session_factory() as session, session.begin():
+        session.add(TaskSession(id=session_id, owner_id=NORTH_OPERATOR, title="AC-18"))
+        await session.flush()
+        session.add(
+            AgentTask(
+                id=task_id,
+                session_id=session_id,
+                owner_id=NORTH_OPERATOR,
+                department_id=NORTH,
+                task_type="SALES",
+                state="SUBMITTING",
+                current_step="commit_order",
+                checkpoint_ref=checkpoint_id,
+            )
+        )
+        session.add(
+            Draft(
+                id=draft_id,
+                task_id=task_id,
+                current_version=0,
+                lock_state="EDITABLE",
+            )
+        )
+        await session.flush()
+        saved = await save_candidate(
+            session,
+            draft_id=draft_id,
+            expected_version=0,
+            candidate=candidate,
+            actor=operator,
+        )
+        payload = {
+            "decision": "APPROVE",
+            "draft_id": str(draft_id),
+            "content_hash": saved.content_hash,
+            "checkpoint_id": checkpoint_id,
+            "interrupt_id": interrupt_id,
+        }
+        command = TaskCommand(
+            id=command_id,
+            task_id=task_id,
+            actor_id=UUID("00000000-0000-4000-8000-000000000102"),
+            kind="REVIEW",
+            payload=payload,
+            expected_version=saved.version,
+            target_interrupt_id=interrupt_id,
+            request_id=f"issue020-{uuid4()}",
+            payload_hash="a" * 64,
+        )
+        session.add(command)
+        await session.flush()
+        session.add(
+            TaskApproval(
+                id=approval_id,
+                task_id=task_id,
+                command_id=command_id,
+                draft_id=draft_id,
+                actor_id=command.actor_id,
+                department_id=NORTH,
+                version=saved.version,
+                content_hash=saved.content_hash,
+                checkpoint_ref=checkpoint_id,
+                interrupt_id=interrupt_id,
+                decision="APPROVE",
+            )
+        )
+        draft = await session.get(Draft, draft_id)
+        assert draft is not None
+        draft.lock_state = "SUBMITTING"
+
+    try:
+        async with async_session_factory() as session, session.begin():
+            contract = await session.get(Contract, NORTH_CONTRACT)
+            assert contract is not None and contract.status == "ACTIVE"
+            contract.status = "INACTIVE"
+
+        async with async_session_factory() as session, session.begin():
+            result = await commit_approved_order(
+                session,
+                task_id=task_id,
+                command_id=command_id,
+                approval_id=approval_id,
+            )
+            assert result.state == "BLOCKED_RULE"
+            assert result.code == "CONTRACT_INACTIVE"
+
+        async with async_session_factory() as session:
+            assert (
+                await session.scalar(select(Order).where(Order.task_id == task_id))
+                is None
+            )
+            assert (
+                await session.scalar(
+                    select(QuotaOccupation).where(QuotaOccupation.task_id == task_id)
+                )
+                is None
+            )
+            approval = await session.get(TaskApproval, approval_id)
+            draft = await session.get(Draft, draft_id)
+            balance = await session.get(ContractBalance, NORTH_CONTRACT)
+            assert approval is not None and approval.invalidated_at is not None
+            assert draft is not None and draft.lock_state == "EDITABLE"
+            assert balance is not None and balance.occupied_amount == Decimal("0.00")
+    finally:
+        async with async_session_factory() as session, session.begin():
+            contract = await session.get(Contract, NORTH_CONTRACT)
+            assert contract is not None
+            contract.status = "ACTIVE"
