@@ -15,6 +15,9 @@ withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 })
     <template v-else-if="name === 'history'"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5m4-1v5l3 2"/></template>
     <template v-else-if="name === 'upload'"><path d="M12 16V4m-5 5 5-5 5 5"/><path d="M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></template>
     <template v-else-if="name === 'plus'"><path d="M12 5v14m-7-7h14"/></template>
+    <template v-else-if="name === 'refresh'"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.5-2L20 12M4 12l2.9 5a7 7 0 0 0 11.5-2"/></template>
+    <template v-else-if="name === 'check'"><path d="m5 12 4 4L19 6"/></template>
+    <template v-else-if="name === 'save'"><path d="M5 3h12l4 4v14H3V3Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></template>
     <template v-else-if="name === 'arrow'"><path d="M5 12h14m-6-6 6 6-6 6"/></template>
     <template v-else-if="name === 'close'"><path d="m18 6-12 12M6 6l12 12"/></template>
     <template v-else-if="name === 'user'"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></template>

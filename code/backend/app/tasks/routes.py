@@ -9,6 +9,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo
@@ -34,11 +35,17 @@ from app.drafts.service import (
     load_draft,
     save_candidate,
 )
-from app.drafts.types import CandidateOrder, FieldEvidenceInput, FieldSource
+from app.drafts.types import (
+    CandidateOrder,
+    FieldEvidenceInput,
+    FieldSource,
+    candidate_amounts,
+)
 from app.models import (
     AgentTask,
     AuthSession,
     Contract,
+    ContractBalance,
     Department,
     Draft,
     Order,
@@ -434,6 +441,48 @@ async def get_task(
     task = await _visible_task(session, task_id, context)
     draft = await session.scalar(select(Draft).where(Draft.task_id == task.id))
     snapshot = await load_draft(session, draft.id) if draft is not None else None
+    quota_preview: dict[str, object] | None = None
+    if snapshot is not None and snapshot.candidate is not None:
+        candidate = snapshot.candidate
+        if candidate.contract_id is not None:
+            # 经办和审批角色没有主数据管理接口权限；在任务可见范围内只读返回额度摘要。
+            # 同时按任务部门过滤合同，避免候选中恶意填入跨部门合同 ID 后泄露额度。
+            contract = await session.scalar(
+                select(Contract).where(
+                    Contract.id == candidate.contract_id,
+                    Contract.department_id == task.department_id,
+                )
+            )
+            if contract is not None:
+                balance = await session.get(ContractBalance, contract.id)
+                _, requested_amount = candidate_amounts(candidate)
+                occupied_amount = balance.occupied_amount if balance else None
+                remaining_amount = (
+                    contract.total_amount - occupied_amount
+                    if occupied_amount is not None
+                    else None
+                )
+                excess_amount = (
+                    max(requested_amount - remaining_amount, Decimal("0.00"))
+                    if requested_amount is not None and remaining_amount is not None
+                    else None
+                )
+                quota_preview = {
+                    "contract_amount": str(contract.total_amount),
+                    "occupied_amount": (
+                        str(occupied_amount) if occupied_amount is not None else None
+                    ),
+                    "remaining_amount": (
+                        str(remaining_amount) if remaining_amount is not None else None
+                    ),
+                    "requested_amount": (
+                        str(requested_amount) if requested_amount is not None else None
+                    ),
+                    "excess_amount": (
+                        str(excess_amount) if excess_amount is not None else None
+                    ),
+                    "balance_available": balance is not None,
+                }
     wait = await session.scalar(
         select(TaskWait).where(TaskWait.task_id == task.id, TaskWait.active)
     )
@@ -478,6 +527,29 @@ async def get_task(
     ):
         available_actions.extend(("INPUT", "EDIT_DRAFT"))
     if (
+        task.state == "QUEUED"
+        and wait is not None
+        and wait.kind == "APPROVAL"
+        and wait.pending_command_id is not None
+        and BUSINESS_OPERATOR in context.roles
+    ):
+        # 只有待处理审批命令和任务作业仍可安全替换时，才向界面开放草稿编辑。
+        pending_review = await session.get(TaskCommand, wait.pending_command_id)
+        pending_job = await session.scalar(
+            select(TaskJob).where(
+                TaskJob.command_id == wait.pending_command_id,
+                TaskJob.kind == "RUN_TASK",
+            )
+        )
+        if (
+            pending_review is not None
+            and pending_review.kind == "REVIEW"
+            and pending_review.state == "READY"
+            and pending_job is not None
+            and pending_job.state == "READY"
+        ):
+            available_actions.append("EDIT_DRAFT")
+    if (
         task.state == "WAITING_APPROVAL"
         and wait is not None
         and wait.kind == "APPROVAL"
@@ -519,6 +591,7 @@ async def get_task(
                 if snapshot is not None
                 else None
             ),
+            "quota_preview": quota_preview,
             "active_wait": active_wait,
             "latest_review": (
                 {
