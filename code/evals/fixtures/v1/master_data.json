@@ -141,6 +141,16 @@
       }
     }
   },
+  "customers": {
+    "customer_north_similar": {
+      "code": "TP-EVAL-CUST-NORTH-SIM-01",
+      "name": "华北示例客户（集团）",
+      "department": "north",
+      "contact": "王先生",
+      "address": "北京市朝阳区评测路 3 号",
+      "active": true
+    }
+  },
   "materials": [
     {
       "id": "MAT-30",

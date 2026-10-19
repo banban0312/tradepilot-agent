@@ -147,6 +147,8 @@ class BackendCaseExecutor:
             ContractBalance,
             ContractLine,
             ContractLineBalance,
+            Customer,
+            Department,
             Draft,
             DraftItem,
             FieldEvidence,
@@ -192,6 +194,44 @@ class BackendCaseExecutor:
 
             contract_number = contract_fixture["number"]
             async with async_session_factory() as session:
+                extra_customer_ids = case.get("customer_fixtures", [])
+                for customer_fixture_id in extra_customer_ids:
+                    customer_fixture = self.fixtures.get("customers", {}).get(
+                        customer_fixture_id
+                    )
+                    if not isinstance(customer_fixture, dict):
+                        raise TypeError("案例引用了不存在的客户夹具")
+                    department = await session.scalar(
+                        select(Department).where(
+                            Department.code
+                            == f"TP-DEMO-{customer_fixture['department'].upper()}"
+                        )
+                    )
+                    if department is None:
+                        raise ValueError("隔离数据库缺少客户夹具所属部门")
+                    customer = await session.scalar(
+                        select(Customer).where(
+                            Customer.department_id == department.id,
+                            Customer.code == customer_fixture["code"],
+                        )
+                    )
+                    if customer is None:
+                        session.add(
+                            Customer(
+                                id=uuid5(
+                                    NAMESPACE_URL,
+                                    f"tradepilot-eval:{customer_fixture_id}:customer",
+                                ),
+                                code=customer_fixture["code"],
+                                name=customer_fixture["name"],
+                                department_id=department.id,
+                                contact=customer_fixture.get("contact"),
+                                address=customer_fixture.get("address"),
+                                active=customer_fixture.get("active", True),
+                            )
+                        )
+                if extra_customer_ids:
+                    await session.commit()
                 contract = await session.scalar(
                     select(Contract).where(Contract.number == contract_number)
                 )

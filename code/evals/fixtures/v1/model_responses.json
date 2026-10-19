@@ -159,6 +159,17 @@
       ],
       "final_text": "已按合同的两条明细保存并核验销售草稿，等待授权人员审批。"
     },
+    "ambiguity-similar-customer": {
+      "rounds": [
+        [
+          {
+            "name": "query_customer",
+            "arguments": { "name": "华北示例客户", "limit": 10 }
+          }
+        ]
+      ],
+      "final_text": "找到多个相似客户，请先确认具体客户后再继续。"
+    },
     "normal-complete-purchase": {
       "rounds": [
         [

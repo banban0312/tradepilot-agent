@@ -117,6 +117,11 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
         (root / "fixtures/v1/master_data.json").read_text(encoding="utf-8")
     )
     assert len(fixtures["contracts"]["sales_north_multi_line"]["lines"]) == 2
+    similar_customer_case = next(
+        case for case in cases if case["id"] == "ambiguity-similar-customer"
+    )
+    assert similar_customer_case["customer_fixtures"] == ["customer_north_similar"]
+    assert fixtures["customers"]["customer_north_similar"]["department"] == "north"
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")
