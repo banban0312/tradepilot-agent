@@ -13,6 +13,7 @@ from app.auth.origin import is_same_origin
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.database import check_database_connection, engine
+from app.imports.routes import router as imports_router
 from app.master_data.routes import router as admin_router
 from app.orders.routes import router as orders_router
 from app.tasks.routes import router as tasks_router
@@ -31,6 +32,7 @@ app.include_router(admin_router)
 app.include_router(orders_router)
 app.include_router(tasks_router)
 app.include_router(artifacts_router)
+app.include_router(imports_router)
 
 
 @app.exception_handler(HTTPException)
