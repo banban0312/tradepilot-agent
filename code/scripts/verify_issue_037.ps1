@@ -123,8 +123,10 @@ services:
             Write-Host "在线模式会调用本机配置的真实模型；API、Worker、MCP 与 PostgreSQL 使用隔离服务。"
         }
             $reportDir = "/workspace/artifacts/evals/$projectName"
+            $codeVersion = (& git -C $repoRoot rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "无法读取当前代码版本。" }
             $command = @(
-                "run", "--rm", "--no-deps", "verify", "uv", "run", "--frozen",
+                "run", "--rm", "--no-deps", "--env", "TRADEPILOT_CODE_VERSION=$codeVersion", "verify", "uv", "run", "--frozen",
                 "python", "-m", "evals.runner", "--mode", $Mode, "--dataset", "v1",
                 "--report-dir", $reportDir
             )

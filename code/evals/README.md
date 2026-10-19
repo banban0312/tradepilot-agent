@@ -66,3 +66,20 @@ uv run --frozen --project backend --directory code python -m pytest -q tests/iss
 ```
 
 跨服务验证入口为 `code/scripts/verify_issue_037.ps1`。在线请求可能产生模型 API 费用；要验证在线错误处理，可使用隔离环境并确认供应商配置/连通性，报告会记录真实失败，不会伪报通过。
+
+## 评测指标与报告解释（M6-03）
+
+每次运行生成 `summary.json`、`cases.jsonl` 和 `report.md`。三份报告记录相同的运行模式、数据集版本、分类计数和质量指标；JSONL 为逐例机器可读明细，Markdown 展示可读摘要和失败定位。
+
+- 字段精确匹配 = 精确匹配字段数 / 已执行案例中预期标注字段数；遗漏字段计入分母并同时降低覆盖率。跳过或执行错误的字段数单独列出，不假作提取失败或成功。
+- 字段分组包含字段路径、字段来源类型（来自持久化字段证据）和文件 MIME 类型。没有来源记录时计为 `unavailable`，不猜测来源。
+- 工具选择按案例所需工具及允许工具集合检查；工具执行率按实际工具 span 的成功状态计算；参数校验报告接受/拒绝次数，不把预期拒绝的非法输入判为成功调用。
+- 规则阻断仅统计预期状态为 `BLOCKED_RULE` 的案例。越权、额度和重复提交安全案例单列分类与不变量通过率，不能由其他正常案例平均掩盖。
+- 幂等和恢复指标按 `duplicate_submission` 分类及 `recovery` 标签计算，分母只含实际执行且可判定的案例；跳过/错误案例在总状态和未执行计数中可见。
+- Token 仅累计模型 span 实际上报的用量；无用量时显示 `unavailable` 并报告覆盖率，绝不写成 0。
+- 耗时分别记录模型 span、工具 span 和评测单例耗时。CLI 无法观测的人工等待明确标为 `unavailable_not_measured_by_cli`。
+- 运行元数据记录运行模式、数据/主数据/输入夹具版本、清单摘要、随机种子、代码版本、Python/平台、模型名/供应商、提示词与工具 Schema 摘要、非敏感模型配置摘要。报告写入前递归移除凭据字段并遮蔽常见 API key 格式。
+
+在线结果和离线夹具结果必须分别运行、分别看 `mode`，不得汇总成一个模型质量分数。每例 JSONL 保存 expected、actual、失败断言、错误码、task/trace/span 引用和输入证据。
+- 参数校验统计以已进入实际 TOOL span 的请求计为通过，以 `function_calling.tool_argument_validation` RULE 错误 span 计为拒绝；没有相应 span 时不推测。
+- 字段评分只纳入固定数据集中标注的业务字段（或 `expected.field_labels` 显式指定项），如审批状态、重放次数等执行事实不混入字段提取准确率。

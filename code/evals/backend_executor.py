@@ -117,6 +117,27 @@ class BackendCaseExecutor:
                 )
             ).hexdigest(),
             "tool_names": sorted(REQUIRED_BUSINESS_TOOLS),
+            "model_configuration_sha256": hashlib.sha256(
+                json.dumps(
+                    {
+                        "provider": settings.model_provider
+                        if mode == "online"
+                        else "offline_fixture",
+                        "model": settings.model_name
+                        if mode == "online"
+                        else "offline-response-fixtures",
+                        "configuration_state": settings.model_configuration_state
+                        if mode == "online"
+                        else "not_used_offline",
+                        "timeout_seconds": settings.model_timeout_seconds,
+                        "max_retries": settings.model_max_retries,
+                        "max_rounds": settings.model_max_rounds,
+                        "max_tool_calls": settings.model_max_tool_calls,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
             "model_configuration": (
                 settings.model_configuration_state
                 if mode == "online"
@@ -989,6 +1010,18 @@ class BackendCaseExecutor:
                 "fields": draft_fields,
                 "issues": (task_data.get("draft") or {}).get("issues", []),
                 "validated": (task_data.get("draft") or {}).get("validated"),
+                "field_evidence": [
+                    {
+                        "field_path": row.field_path,
+                        "source_type": row.source_type,
+                        "locator": {
+                            key: row.locator[key]
+                            for key in ("page", "sheet", "cell", "row", "column")
+                            if isinstance(row.locator, dict) and key in row.locator
+                        },
+                    }
+                    for row in evidence_rows
+                ],
             },
             "active_wait": task_data.get("active_wait"),
             "trace": {
