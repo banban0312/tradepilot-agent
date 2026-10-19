@@ -307,6 +307,9 @@ class ImportBatchItem(Base):
             "stop_result IS NULL OR stop_result IN ('NOT_STARTED', 'ALREADY_STARTED')",
             name="ck_import_batch_items_stop_result",
         ),
+        CheckConstraint(
+            "edit_version > 0", name="ck_import_batch_items_edit_version_positive"
+        ),
         UniqueConstraint(
             "batch_id", "sheet_name", "group_id", name="uq_import_batch_items_group"
         ),
@@ -337,6 +340,12 @@ class ImportBatchItem(Base):
     )
     task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
     stop_result: Mapped[str | None] = mapped_column(String(24))
+    candidate_json: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    edit_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

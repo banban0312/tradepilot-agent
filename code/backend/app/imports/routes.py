@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import anyio
@@ -22,6 +22,8 @@ from app.config import settings
 from app.database import get_db_session
 from app.imports.batches import (
     BatchIdempotencyConflict,
+    BatchItemVersionConflict,
+    correct_batch_item,
     create_batch,
     load_batch,
     stop_batch,
@@ -43,6 +45,15 @@ class CreateBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     artifact_id: UUID
+
+
+class CorrectBatchGroupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sheet: str
+    group_id: str
+    expected_version: int
+    candidate: dict[str, Any]
 
 
 def _api_error(status: int, code: str, message: str) -> HTTPException:
@@ -222,5 +233,31 @@ async def stop_import_batch(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, object]:
     result = await stop_batch(session, batch_id=batch_id, context=context)
+    await session.commit()
+    return {"data": result, "request_id": request_id(request)}
+
+
+@router.patch("/{batch_id}/groups")
+async def correct_import_batch_group(
+    batch_id: UUID,
+    body: CorrectBatchGroupRequest,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    try:
+        result = await correct_batch_item(
+            session,
+            batch_id=batch_id,
+            sheet_name=body.sheet,
+            group_id=body.group_id,
+            expected_version=body.expected_version,
+            candidate_data=body.candidate,
+            context=context,
+        )
+    except BatchItemVersionConflict as exc:
+        raise _api_error(409, "VERSION_CONFLICT", str(exc)) from exc
+    except BatchIdempotencyConflict as exc:
+        raise _api_error(409, "IDEMPOTENCY_CONFLICT", str(exc)) from exc
     await session.commit()
     return {"data": result, "request_id": request_id(request)}

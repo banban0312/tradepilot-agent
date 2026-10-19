@@ -19,6 +19,7 @@ const roleText = computed(() => identity.value?.roles.map((role) => roleLabels[r
 const userInitial = computed(() => identity.value?.login.slice(0, 1).toUpperCase() ?? 'U')
 const pageTitle = computed(() => {
   if (route.name === 'task-workbench') return '全屏工作台'
+  if (route.name === 'import-batch') return '批量校验与审批'
   if (route.name === 'order-center') return '订单中心'
   if (route.name === 'interface-states') return '界面状态与异常反馈'
   if (route.name === 'master-data') return '主数据与配置'

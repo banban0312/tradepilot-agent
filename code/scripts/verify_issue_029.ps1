@@ -1,4 +1,4 @@
-param([switch]$IssueOnly)
+param([switch]$IssueOnly, [switch]$Issue030)
 
 $ErrorActionPreference = 'Stop'
 $codeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -67,17 +67,20 @@ try {
         Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'upgrade', 'head')
         Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'check')
         $pythonFiles = @('app/imports/batches.py', 'app/imports/routes.py', 'app/models.py', 'alembic/versions/f4c91b62a7d3_import_batches.py', '/workspace/tests/issues/test_issue_029.py')
+        if ($Issue030) { $pythonFiles += @('alembic/versions/f5b0374c9a1d_import_batch_item_editing.py', '/workspace/tests/issues/test_issue_030.py') }
         Invoke-Compose (@('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'ruff', 'check', '--ignore', 'EXE002', '--config', 'lint.isort.known-first-party=["app"]') + $pythonFiles)
         Invoke-Compose (@('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'ruff', 'format', '--check') + $pythonFiles)
         Invoke-Compose (@('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'compileall', '-q') + $pythonFiles)
         Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'app.seed')
         $testFiles = @('/workspace/tests/issues/test_issue_029.py')
+        if ($Issue030) { $testFiles += '/workspace/tests/issues/test_issue_030.py' }
         if (-not $IssueOnly) {
             $testFiles = @('/workspace/tests/issues/test_issue_010.py', '/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_018.py', '/workspace/tests/issues/test_issue_022.py', '/workspace/tests/issues/test_issue_023.py', '/workspace/tests/issues/test_issue_024.py', '/workspace/tests/issues/test_issue_025.py', '/workspace/tests/issues/test_issue_026.py', '/workspace/tests/issues/test_issue_027.py', '/workspace/tests/issues/test_issue_028.py', '/workspace/tests/issues/test_issue_029.py')
         }
         Invoke-Compose (@('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-x', '-vv', '-s') + $testFiles)
         if ($IssueOnly) {
-            Write-Host 'M5-01 单项验收通过：批次父子持久化、Excel 源行关联、幂等、5 路并发和停止边界均完成。'
+            if ($Issue030) { Write-Host 'M5-01/M5-02 单项验收通过：批次持久化、组内修正、乐观版本、5 路并发和停止边界均完成。' }
+            else { Write-Host 'M5-01 单项验收通过：批次父子持久化、Excel 源行关联、幂等、5 路并发和停止边界均完成。' }
         }
         else {
             Write-Host 'M5-01 验收通过：批次父子持久化、Excel 源行关联、重复请求幂等、5 路并发、停止边界及既有回归均完成。'
