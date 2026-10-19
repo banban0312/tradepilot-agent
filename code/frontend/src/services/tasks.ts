@@ -122,6 +122,23 @@ export type TaskSnapshot = {
   updated_at: string
 }
 
+export type FailedTaskSpan = {
+  span_id: string
+  trace_id: string
+  task_id: string
+  parent_span_id: string | null
+  name: string
+  kind: string
+  attempt: number
+  execution_mode: string
+  protocol: string | null
+  status: 'ERROR' | 'INTERRUPTED'
+  start_at: string
+  end_at: string | null
+  duration_ms: number | null
+  error: { code: string | null; retryable: boolean }
+}
+
 export type TaskSummary = {
   task_id: string
   session_id: string
@@ -151,7 +168,7 @@ function apiError(body: ApiEnvelope<unknown>, status: number) {
   return exception
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, idempotencyKey?: string): Promise<T> {
   const auth = useAuthStore()
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
@@ -161,7 +178,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!csrf) throw new Error('当前登录状态缺少安全校验信息，请刷新页面后重试。')
     headers.set('X-CSRF-Token', csrf)
     headers.set('X-Request-ID', requestId())
-    headers.set('Idempotency-Key', requestId())
+    headers.set('Idempotency-Key', idempotencyKey ?? requestId())
   }
 
   let response: Response
@@ -178,6 +195,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const tasksApi = {
   list: () => request<TaskList>('/api/v1/tasks?limit=20'),
   get: (taskId: string) => request<TaskSnapshot>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
+  getFailedSpan: (taskId: string, spanId: string) => request<FailedTaskSpan>(`/api/v1/tasks/${encodeURIComponent(taskId)}/trace/${encodeURIComponent(spanId)}`),
+  retry: (task: TaskSnapshot) => {
+    const spanId = task.last_error?.failed_span_id
+    if (task.state !== 'FAILED' || !task.available_actions.includes('RETRY') || typeof spanId !== 'string') {
+      throw new Error('该任务当前没有可安全恢复的失败，请刷新后核对状态。')
+    }
+    const idempotencyKey = `retry-${task.task_id}-${task.projection_version}-${spanId}`
+    return request<Record<string, unknown>>(`/api/v1/tasks/${encodeURIComponent(task.task_id)}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ failed_span_id: spanId, expected_projection_version: task.projection_version }),
+    }, idempotencyKey)
+  },
   create: (orderType: OrderType, text: string, artifactIds: string[] = []) =>
     request<TaskSummary>('/api/v1/tasks', {
       method: 'POST',
