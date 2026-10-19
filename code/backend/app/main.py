@@ -14,6 +14,12 @@ from app.auth.origin import is_same_origin
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.database import check_database_connection, engine
+from app.evaluations.routes import (
+    router as evaluations_router,
+)
+from app.evaluations.routes import (
+    shutdown_evaluations,
+)
 from app.imports.routes import router as imports_router
 from app.master_data.routes import router as admin_router
 from app.orders.routes import router as orders_router
@@ -24,6 +30,7 @@ from app.tasks.routes import router as tasks_router
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """进程退出时释放数据库连接池。"""
     yield
+    await shutdown_evaluations()
     await engine.dispose()
 
 
@@ -35,6 +42,7 @@ app.include_router(orders_router)
 app.include_router(tasks_router)
 app.include_router(artifacts_router)
 app.include_router(imports_router)
+app.include_router(evaluations_router)
 
 
 @app.exception_handler(HTTPException)

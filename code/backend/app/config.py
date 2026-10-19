@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     )
 
     database_url: SecretStr
+    evaluation_database_admin_url: SecretStr | None = None
     checkpoint_schema: str = Field(
         default="tradepilot_checkpoints", pattern=r"^[a-z_][a-z0-9_]{0,62}$"
     )
@@ -49,6 +50,7 @@ class Settings(BaseSettings):
     app_origin: str | None = None
     trace_retention_days: int = Field(default=30, ge=1, le=3650)
     artifact_retention_days: int = Field(default=30, ge=1, le=3650)
+    evaluation_reports_root: Path = Path("/var/lib/tradepilot/evaluations")
 
     @field_validator("business_timezone")
     @classmethod

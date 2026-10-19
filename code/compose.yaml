@@ -16,6 +16,21 @@ services:
       retries: 12
       start_period: 5s
 
+  eval-db:
+    image: postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    environment:
+      POSTGRES_DB: ${EVALUATION_POSTGRES_DB:?Set a separate evaluation database name in backend/.env}
+      POSTGRES_USER: ${EVALUATION_POSTGRES_USER:?Set a separate evaluation database role in backend/.env}
+      POSTGRES_PASSWORD: ${EVALUATION_POSTGRES_PASSWORD:?Set a separate evaluation database password in backend/.env}
+    volumes:
+      - evaluation_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
   api:
     image: tradepilot/backend:local
     build:
@@ -38,8 +53,11 @@ services:
       - "127.0.0.1:${API_PORT:-8010}:8000"
     volumes:
       - attachments:/var/lib/tradepilot/attachments
+      - evaluation_reports:/var/lib/tradepilot/evaluations
     depends_on:
       db:
+        condition: service_healthy
+      eval-db:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=2)); assert d['status']=='ready'"]
@@ -147,4 +165,6 @@ services:
 
 volumes:
   postgres_data:
+  evaluation_postgres_data:
   attachments:
+  evaluation_reports:

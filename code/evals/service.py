@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -162,15 +163,26 @@ class EvaluationService:
         self.executor = executor
         self.mode = mode
 
-    async def run(self, cases: list[dict]) -> list[CaseResult]:
+    async def run(
+        self,
+        cases: list[dict],
+        *,
+        on_case_completed: Callable[[int, int, CaseResult], None] | None = None,
+    ) -> list[CaseResult]:
         results = []
+
+        def record(result: CaseResult) -> None:
+            results.append(result)
+            if on_case_completed is not None:
+                on_case_completed(len(results), len(cases), result)
+
         for case in cases:
             started = time.perf_counter()
             expected = case["expected"]
             try:
                 actual = await self.executor.execute_case(case, mode=self.mode)
             except CaseSkipped as exc:
-                results.append(
+                record(
                     CaseResult(
                         case_id=case["id"],
                         category=case["category"],
@@ -188,7 +200,7 @@ class EvaluationService:
                 diagnostic = getattr(exc, "evaluation_stage", None)
                 if isinstance(diagnostic, str) and len(diagnostic) <= 2000:
                     actual["diagnostic"] = diagnostic
-                results.append(
+                record(
                     CaseResult(
                         case_id=case["id"],
                         category=case["category"],
@@ -205,7 +217,7 @@ class EvaluationService:
             try:
                 failed = evaluate_assertions(expected, actual)
             except Exception as exc:  # noqa: BLE001 - malformed assertions are case errors.
-                results.append(
+                record(
                     CaseResult(
                         case_id=case["id"],
                         category=case["category"],
@@ -219,7 +231,7 @@ class EvaluationService:
                     )
                 )
                 continue
-            results.append(
+            record(
                 CaseResult(
                     case_id=case["id"],
                     category=case["category"],

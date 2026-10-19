@@ -11,6 +11,7 @@ import TaskHistoryView from './views/TaskHistoryView.vue'
 import TaskTraceView from './views/TaskTraceView.vue'
 import RuntimeSettingsView from './views/RuntimeSettingsView.vue'
 import AuditLogView from './views/AuditLogView.vue'
+import EvaluationCenterView from './views/EvaluationCenterView.vue'
 import { useTaskWorkspaceStore } from './stores/taskWorkspace'
 
 export const router = createRouter({
@@ -30,6 +31,7 @@ export const router = createRouter({
         { path: 'admin/master-data', name: 'master-data', component: MasterDataView, meta: { requiresSystemAdmin: true } },
         { path: 'admin/runtime-settings', name: 'runtime-settings', component: RuntimeSettingsView, meta: { requiresSystemAdmin: true } },
         { path: 'admin/audit', name: 'audit-log', component: AuditLogView, meta: { requiresSystemAdmin: true } },
+        { path: 'admin/evaluations', name: 'evaluation-center', component: EvaluationCenterView, meta: { requiresSystemAdmin: true } },
         { path: 'interface-states', name: 'interface-states', component: InterfaceStatesView },
       ],
     },

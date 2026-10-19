@@ -66,8 +66,9 @@ class BackendCaseExecutor:
 
         self.settings = settings
         database_url = make_url(settings.database_url.get_secret_value())
-        if database_url.host != "db":
-            raise ValueError("评测数据库必须是隔离 Compose 网络中的 db 服务")
+        expected_database_host = os.getenv("EVAL_DATABASE_HOST", "db")
+        if database_url.host != expected_database_host:
+            raise ValueError("评测数据库必须使用配置的隔离 PostgreSQL 服务")
         if (
             mode == "online"
             and settings.model_configuration_state != "configured_unverified"
