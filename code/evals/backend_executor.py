@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,7 +23,7 @@ if not _BACKEND_ROOT.is_dir():
 if _BACKEND_ROOT.is_dir() and str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-from evals.service import CaseSkipped
+from evals.service import CaseSkipped  # noqa: E402 - backend path is registered above.
 
 
 class BackendCaseExecutor:
@@ -115,6 +116,14 @@ class BackendCaseExecutor:
             "commit_once",
             "replay_same_approved_command",
         ]
+        stale_approval_case = case.get(
+            "id"
+        ) == "unauthorized-old-approval" and actions == [
+            "create_task",
+            "submit_approval",
+            "edit_draft",
+            "replay_stale_approval",
+        ]
         if (
             not duplicate_replay_case
             and actions != ["attempt_approve"]
@@ -129,6 +138,7 @@ class BackendCaseExecutor:
                 ["human_approve_current_version", "commit_once"],
             )
             and not duplicate_replay_case
+            and not stale_approval_case
         ):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
         input_kind = case.get("input", {}).get("kind")
@@ -150,9 +160,22 @@ class BackendCaseExecutor:
                 "input_fixture_version"
             ):
                 raise ValueError("离线模型响应夹具版本与数据集输入版本不一致")
-            model_client_factory = lambda _config: FixtureModelClient(
-                case_id=case["id"], fixture=fixture
-            )
+
+            fixture_runs = 0
+
+            def model_client_factory(_config):
+                nonlocal fixture_runs
+                selected_fixture = fixture
+                if stale_approval_case and fixture_runs > 0:
+                    # 草稿编辑已保存版本 2；恢复流程的固定工具调用必须以该版本为基线。
+                    selected_fixture = deepcopy(fixture)
+                    for round_calls in selected_fixture.get("rounds", []):
+                        for call in round_calls:
+                            if call.get("name") == "save_order_draft":
+                                call["arguments"]["expected_version"] = 2
+                fixture_runs += 1
+                return FixtureModelClient(case_id=case["id"], fixture=selected_fixture)
+
             return await self._execute_task(
                 case,
                 model_client_factory=model_client_factory,
@@ -364,6 +387,14 @@ class BackendCaseExecutor:
             "human_approve_current_version",
             "commit_once",
             "replay_same_approved_command",
+        ]
+        stale_approval_case = case.get(
+            "id"
+        ) == "unauthorized-old-approval" and actions == [
+            "create_task",
+            "submit_approval",
+            "edit_draft",
+            "replay_stale_approval",
         ]
         from app.database import async_session_factory, engine
         from app.models import (
@@ -583,7 +614,18 @@ class BackendCaseExecutor:
             if not await worker.run_once():
                 raise RuntimeError("隔离评测 Worker 未领取新建任务")
 
-            if len(actions) > 1:
+            if stale_approval_case:
+                (
+                    action_error_code,
+                    action_status_code,
+                ) = await self._run_stale_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"],
+                    actions=case["actions"],
+                    worker=worker,
+                )
+            elif len(actions) > 1:
                 await self._run_approval_actions(
                     client=client,
                     task_id=task_id,
@@ -659,6 +701,9 @@ class BackendCaseExecutor:
                         select(TaskApproval).where(TaskApproval.task_id == task_uuid)
                     )
                 ).all()
+            )
+            invalidated_approvals = sum(
+                row.invalidated_at is not None for row in approval_rows
             )
             balance = await session.get(ContractBalance, contract.id)
             occupied_after = (
@@ -741,6 +786,10 @@ class BackendCaseExecutor:
             "database": {
                 "orders": orders,
                 "approvals": approvals,
+                "invalidated_approvals": invalidated_approvals,
+                "current_draft_version": draft.current_version
+                if draft is not None
+                else 0,
                 "approval_actor_is_distinct": bool(approval_rows)
                 and all(row.actor_id != task_owner_id for row in approval_rows),
                 "same_order_id_on_replay": same_order_id_on_replay,
@@ -928,6 +977,101 @@ class BackendCaseExecutor:
         review_response.raise_for_status()
         if not await worker.run_once():
             raise RuntimeError("人工审批后隔离 Worker 未领取恢复作业")
+
+    async def _run_stale_approval_actions(
+        self, *, client, task_id: str, approver: dict, actions: list[dict], worker
+    ) -> tuple[str | None, int | None]:
+        """验证草稿编辑会持久化失效旧审批，并拒绝同一幂等键重放。"""
+
+        def ensure_success(response: httpx.Response, step: str) -> None:
+            if not response.is_success:
+                detail = (
+                    f"{step}失败（HTTP {response.status_code}）：{response.text[:500]}"
+                )
+                print(detail, file=sys.stderr, flush=True)
+                raise RuntimeError(detail)
+
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        ensure_success(task_response, "读取审批任务")
+        active_wait = task_response.json()["data"].get("active_wait")
+        if (
+            not isinstance(active_wait, dict)
+            or task_response.json()["data"].get("state") != "WAITING_APPROVAL"
+        ):
+            raise RuntimeError("旧审批案例没有有效审批等待点")
+
+        key = f"eval-stale-approval-{uuid4().hex}"
+        approval_payload = {
+            "decision": "APPROVE",
+            "draft_version": active_wait["draft_version"],
+            "content_hash": active_wait["content_hash"],
+            "checkpoint_id": active_wait["checkpoint_id"],
+            "interrupt_id": active_wait["interrupt_id"],
+        }
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        ensure_success(login_response, "登录审批人")
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        approval_response = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": key},
+            json=approval_payload,
+        )
+        ensure_success(approval_response, "提交旧版本审批")
+
+        owner = self.fixtures["actors"]["operator_north"]
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": owner["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        ensure_success(login_response, "恢复经办人身份")
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        edit = next(item for item in actions if item["kind"] == "edit_draft")
+        edit_response = await client.patch(
+            f"/api/v1/tasks/{task_id}/draft",
+            headers={"Idempotency-Key": f"eval-edit-stale-approval-{uuid4().hex}"},
+            json={
+                "expected_version": active_wait["draft_version"],
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+                "patch": edit.get("patch", {"delivery_date": "2026-11-02"}),
+                "file_confirmations": [],
+            },
+        )
+        ensure_success(edit_response, "编辑已批准草稿")
+
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        ensure_success(login_response, "重新登录审批人")
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        replay = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": key},
+            json=approval_payload,
+        )
+        if replay.status_code != 409:
+            raise RuntimeError(
+                f"失效审批幂等重放应返回 409，实际为 {replay.status_code}"
+            )
+        replay_payload = replay.json()
+        detail = replay_payload.get("error", replay_payload.get("detail", {}))
+        error_code = detail.get("code") if isinstance(detail, dict) else None
+        if not await worker.run_once():
+            raise RuntimeError("编辑草稿后隔离 Worker 未领取新输入作业")
+        return error_code, replay.status_code
 
     async def _seed_wrong_department_approver(
         self,

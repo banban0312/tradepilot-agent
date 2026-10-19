@@ -126,6 +126,20 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
         case for case in cases if case["id"] == "abnormal-mcp-unavailable"
     )
     assert mcp_failure_case["simulate_mcp_unavailable"] is True
+    stale_approval_case = next(
+        case for case in cases if case["id"] == "unauthorized-old-approval"
+    )
+    assert [action["kind"] for action in stale_approval_case["actions"]] == [
+        "create_task",
+        "submit_approval",
+        "edit_draft",
+        "replay_stale_approval",
+    ]
+    assert stale_approval_case["expected"]["facts"]["invalidated_approvals"] == 1
+    response_fixtures = json.loads(
+        (root / "fixtures/v1/model_responses.json").read_text(encoding="utf-8")
+    )
+    assert "unauthorized-old-approval" in response_fixtures["cases"]
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")

@@ -2288,6 +2288,14 @@ async def patch_task_draft(
         )
         if pending_approval is not None and pending_approval.invalidated_at is None:
             pending_approval.invalidated_at = datetime.now(UTC)
+        # 批准请求提交时会锁定草稿；在同一事务中作废审批并恢复可编辑态。
+        # 后续保存新版本若失败，作废、解锁和命令状态都会一起回滚。
+        draft = await session.scalar(
+            select(Draft).where(Draft.task_id == task.id).with_for_update()
+        )
+        if draft is None:
+            raise _api_error(409, "DRAFT_NOT_FOUND", "当前审批草稿不存在")
+        draft.lock_state = "EDITABLE"
         wait.pending_command_id = None
 
     candidate = _patch_candidate(snapshot.candidate, body.patch)
