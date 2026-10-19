@@ -138,4 +138,27 @@ describe('Issue #32 全屏与悬浮窗共享任务状态', () => {
     expect(workspace.replyText).toBe('')
     expect(workspace.commandSubmitting).toBe(false)
   })
+
+  it('审批等待继续绑定同一任务与草稿版本，悬浮窗不越权提交审批', async () => {
+    const approval = snapshot()
+    approval.state = 'WAITING_APPROVAL'
+    approval.available_actions = ['APPROVE']
+    approval.active_wait = {
+      kind: 'APPROVAL', checkpoint_id: 'approval-checkpoint', interrupt_id: 'approval-interrupt',
+      draft_version: 1, content_hash: 'a'.repeat(64), missing_fields: [], reason: null,
+    }
+    serviceMocks.get.mockResolvedValue(approval)
+    const workspace = useTaskWorkspaceStore()
+    await workspace.activateTask('task-1')
+    workspace.replyText = '这段内容不能提交为审批决定'
+
+    const result = await workspace.submitReply()
+
+    expect(result).toBe(false)
+    expect(workspace.task?.task_id).toBe('task-1')
+    expect(workspace.task?.active_wait?.kind).toBe('APPROVAL')
+    expect(workspace.task?.active_wait?.draft_version).toBe(1)
+    expect(workspace.replyText).toBe('这段内容不能提交为审批决定')
+    expect(serviceMocks.supplement).not.toHaveBeenCalled()
+  })
 })
