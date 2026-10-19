@@ -81,25 +81,40 @@ describe('Issue #32 全屏与悬浮窗共享任务状态', () => {
     setActivePinia(createPinia())
   })
 
-  it('切换同一任务时复用快照和事件流，保留未发送内容与未保存草稿', async () => {
+  it('输入等待和审批等待间切换工作台/悬浮窗时复用任务与事件流', async () => {
     const initial = snapshot()
     serviceMocks.get.mockResolvedValueOnce(initial)
     const workspace = useTaskWorkspaceStore()
     await workspace.activateTask('task-1')
+    expect(workspace.task?.active_wait?.kind).toBe('INPUT')
     workspace.replyText = '尚未发送的补充内容'
     workspace.draftForm!.address = '本地未保存地址'
+    workspace.widgetOpen = true
+    workspace.widgetOpen = false
+    await workspace.activateTask('task-1')
 
     const updated = snapshot()
+    updated.state = 'WAITING_APPROVAL'
+    updated.available_actions = ['APPROVE']
+    updated.active_wait = {
+      kind: 'APPROVAL', checkpoint_id: 'approval-checkpoint', interrupt_id: 'approval-interrupt',
+      draft_version: 2, content_hash: 'b'.repeat(64), missing_fields: [], reason: null,
+    }
     updated.projection_version = 2
     updated.draft!.version = 2
     updated.draft!.candidate!.address = '服务端新地址'
     serviceMocks.get.mockResolvedValueOnce(updated)
     await workspace.refreshSnapshot()
+    workspace.widgetOpen = true
+    workspace.widgetOpen = false
     await workspace.activateTask('task-1')
 
     expect(workspace.replyText).toBe('尚未发送的补充内容')
     expect(workspace.draftForm?.address).toBe('本地未保存地址')
+    expect(workspace.task?.state).toBe('WAITING_APPROVAL')
+    expect(workspace.task?.active_wait?.kind).toBe('APPROVAL')
     expect(serviceMocks.get).toHaveBeenCalledTimes(2)
+    expect(serviceMocks.supplement).not.toHaveBeenCalled()
     expect(FakeEventSource.instances).toHaveLength(1)
   })
 
