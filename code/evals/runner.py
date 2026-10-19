@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import importlib
 import os
+import platform
 import random
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +42,18 @@ async def _run(args: argparse.Namespace) -> int:
         case_ids=set(args.case) if args.case else None,
         categories=set(args.category) if args.category else None,
     )
+    file_fixtures = manifest.get("files", {})
+    for case in selected:
+        input_data = case.get("input", {})
+        fixture_id = (
+            input_data.get("fixture_id") if isinstance(input_data, dict) else None
+        )
+        file_metadata = file_fixtures.get(fixture_id, {}) if fixture_id else {}
+        media_type = (
+            file_metadata.get("media_type") if isinstance(file_metadata, dict) else None
+        )
+        if media_type:
+            case["input"] = {**input_data, "file_type": media_type}
     unsupported = [
         case["id"] for case in selected if args.mode not in case["execution_modes"]
     ]
@@ -74,6 +89,14 @@ async def _run(args: argparse.Namespace) -> int:
         "master_data_version": manifest["master_data_version"],
         "input_fixture_version": manifest["input_fixture_version"],
         "random_seed": args.random_seed,
+        "manifest_sha256": hashlib.sha256(
+            (dataset_root / "datasets" / args.dataset / "manifest.json").read_bytes()
+        ).hexdigest(),
+        "code_version": _code_version(dataset_root),
+        "runtime_environment": {
+            "python_version": platform.python_version(),
+            "platform": platform.system(),
+        },
         "started_at": args.started_at,
         "completed_at": datetime.now(UTC).isoformat(),
         "selected_case_ids": [case["id"] for case in selected],
@@ -89,6 +112,22 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"评测报告：{Path(args.report_dir).resolve()}")
     print(f"案例 {summary['case_count']}：{summary['status_counts']}")
     return summary["exit_code"]
+
+
+def _code_version(dataset_root: Path) -> str:
+    configured = os.getenv("TRADEPILOT_CODE_VERSION")
+    if configured:
+        return configured[:128]
+    try:
+        return subprocess.run(
+            ["git", "-C", str(dataset_root.parent.parent), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()[:128]
+    except (OSError, subprocess.SubprocessError):
+        return "unavailable"
 
 
 def build_parser() -> argparse.ArgumentParser:
