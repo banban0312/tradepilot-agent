@@ -43,7 +43,7 @@ export const importsApi = {
     if (!response.ok) throw await readError(response)
     return response.blob()
   },
-  async preview(file: File): Promise<ImportPreview> {
+  async upload(file: File): Promise<string> {
     const auth = useAuthStore()
     const csrf = auth.identity?.csrf_token
     if (!csrf) throw new Error('登录状态缺少安全校验信息，请刷新页面后重试。')
@@ -58,6 +58,12 @@ export const importsApi = {
     })
     if (!upload.ok) throw await readError(upload)
     const artifact = await upload.json() as { data: { artifact_id: string } }
+    return artifact.data.artifact_id
+  },
+  async previewArtifact(artifactId: string): Promise<ImportPreview> {
+    const auth = useAuthStore()
+    const csrf = auth.identity?.csrf_token
+    if (!csrf) throw new Error('登录状态缺少安全校验信息，请刷新页面后重试。')
     const response = await fetch('/api/v1/imports/preview', {
       method: 'POST',
       credentials: 'same-origin',
@@ -67,10 +73,14 @@ export const importsApi = {
         'X-Request-ID': crypto.randomUUID(),
         'Idempotency-Key': crypto.randomUUID(),
       },
-      body: JSON.stringify({ artifact_id: artifact.data.artifact_id }),
+      body: JSON.stringify({ artifact_id: artifactId }),
     })
     if (!response.ok) throw await readError(response)
     const result = await response.json() as { data: ImportPreview }
     return result.data
+  },
+  async preview(file: File): Promise<ImportPreview> {
+    const artifactId = await this.upload(file)
+    return this.previewArtifact(artifactId)
   },
 }

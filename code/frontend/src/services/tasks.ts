@@ -50,6 +50,13 @@ export type DraftCandidate = {
   items: DraftItem[]
   evidence: Array<Record<string, unknown>>
 }
+export type FileFieldConfirmation = {
+  field_path: string
+  artifact_id: string
+  page_number: number
+  locator: { type: 'text_range' | 'bbox'; [key: string]: number | string }
+  raw_value: string
+}
 
 export type DraftIssue = { code: string; field: string; message: string }
 export type QuotaPreview = {
@@ -171,10 +178,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const tasksApi = {
   list: () => request<TaskList>('/api/v1/tasks?limit=20'),
   get: (taskId: string) => request<TaskSnapshot>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
-  create: (orderType: OrderType, text: string) =>
+  create: (orderType: OrderType, text: string, artifactIds: string[] = []) =>
     request<TaskSummary>('/api/v1/tasks', {
       method: 'POST',
-      body: JSON.stringify({ order_type: orderType, input: { text } }),
+      body: JSON.stringify({ order_type: orderType, input: { text, artifact_ids: artifactIds } }),
     }),
   supplement: (task: TaskSnapshot, text: string) => {
     if (!task.active_wait) throw new Error('任务当前没有可继续的补充信息等待点，请刷新任务。')
@@ -188,7 +195,11 @@ export const tasksApi = {
       }),
     })
   },
-  patchDraft: (task: TaskSnapshot, patch: Partial<DraftCandidate>) => {
+  patchDraft: (
+    task: TaskSnapshot,
+    patch: Partial<DraftCandidate>,
+    fileConfirmations: FileFieldConfirmation[] = [],
+  ) => {
     const wait = task.active_wait
     const editableWait = wait?.kind === 'INPUT'
       || (task.state === 'QUEUED' && wait?.kind === 'APPROVAL')
@@ -202,6 +213,7 @@ export const tasksApi = {
         interrupt_id: wait.interrupt_id,
         checkpoint_id: wait.checkpoint_id,
         patch,
+        file_confirmations: fileConfirmations,
       }),
     })
   },

@@ -53,9 +53,12 @@ from app.models import (
     ContractBalance,
     Department,
     Draft,
+    FieldEvidence,
+    InputArtifact,
     Material,
     Order,
     TaskApproval,
+    TaskArtifact,
     TaskCommand,
     TaskEvent,
     TaskEventCursor,
@@ -130,11 +133,24 @@ class TaskSupplementRequest(StrictModel):
     artifact_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
 
+class FileFieldConfirmation(StrictModel):
+    """用户明确采纳的解析值；身份和确认时间只由服务端记录。"""
+
+    field_path: str = Field(min_length=1, max_length=512)
+    artifact_id: UUID
+    page_number: int = Field(ge=1, le=1000)
+    locator: dict[str, Any] = Field(min_length=1, max_length=8)
+    raw_value: Any
+
+
 class DraftPatchRequest(StrictModel):
     expected_version: int = Field(ge=1)
     interrupt_id: str = Field(min_length=1, max_length=256)
     checkpoint_id: str = Field(min_length=1, max_length=256)
     patch: dict[str, Any] = Field(min_length=1, max_length=32)
+    file_confirmations: list[FileFieldConfirmation] = Field(
+        default_factory=list, max_length=64
+    )
 
 
 class MaterialMatchRequest(StrictModel):
@@ -446,10 +462,10 @@ async def create_task_endpoint(
 ) -> dict[str, object]:
     key = _idempotency_key(idempotency_key)
     text = body.input.text.strip() if body.input.text else ""
-    if not text and not body.input.artifact_ids:
-        raise _api_error(422, "INPUT_INVALID", "请提供文本或附件")
-    if body.input.artifact_ids:
-        raise _api_error(422, "ARTIFACT_FORBIDDEN", "当前版本暂不支持附件任务")
+    if not text:
+        raise _api_error(422, "INPUT_INVALID", "请先描述订单需求；附件用于补充来源证据")
+    if len(set(body.input.artifact_ids)) != len(body.input.artifact_ids):
+        raise _api_error(422, "INPUT_INVALID", "附件不能重复")
     user = await session.get(User, context.user_id)
     if (
         user is None
@@ -459,6 +475,31 @@ async def create_task_endpoint(
         raise _api_error(403, "ACCESS_DENIED", "当前账号没有可用的默认部门")
     require_business_access(context, user.department_id)
     _require_task_operator(context)
+
+    artifacts: list[InputArtifact] = []
+    if body.input.artifact_ids:
+        found_artifacts = list(
+            (
+                await session.scalars(
+                    select(InputArtifact).where(
+                        InputArtifact.id.in_(body.input.artifact_ids),
+                        InputArtifact.owner_id == context.user_id,
+                        InputArtifact.department_id == user.department_id,
+                    )
+                )
+            ).all()
+        )
+        if len(found_artifacts) != len(body.input.artifact_ids):
+            raise _api_error(404, "RESOURCE_NOT_FOUND", "附件不存在或无权用于此任务")
+        by_id = {item.id: item for item in found_artifacts}
+        artifacts = [by_id[artifact_id] for artifact_id in body.input.artifact_ids]
+        if any(
+            item.state != "STORED"
+            or item.metadata_json.get("parse_intent")
+            not in {"contract_pdf", "receipt_image"}
+            for item in artifacts
+        ):
+            raise _api_error(415, "FILE_UNSUPPORTED", "任务附件仅支持 PDF 和单据图片")
 
     # 确定性服务端 ID 配合事务 advisory lock，使同一账号的创建重试不生成第二个任务。
     await session.execute(
@@ -472,10 +513,12 @@ async def create_task_endpoint(
     existing = await session.get(AgentTask, task_id)
     payload: dict[str, object] = {
         "text": text,
-        "input_type": "TEXT",
+        "input_type": "TEXT_AND_FILES" if artifacts else "TEXT",
         "order_type": body.order_type,
         "session_id": str(body.session_id) if body.session_id else None,
     }
+    if artifacts:
+        payload["artifact_ids"] = [str(item.id) for item in artifacts]
     if existing is None:
         try:
             task = await create_task(
@@ -483,7 +526,7 @@ async def create_task_endpoint(
                 owner_id=context.user_id,
                 department_id=user.department_id,
                 task_type=body.order_type,
-                title=text[:120],
+                title=(text or artifacts[0].original_name)[:120],
                 task_id=task_id,
                 session_id=body.session_id,
             )
@@ -495,6 +538,23 @@ async def create_task_endpoint(
         if existing.task_type != body.order_type:
             raise _api_error(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同任务类型")
         task = existing
+
+    if existing is None:
+        session.add_all(
+            TaskArtifact(task_id=task.id, artifact_id=item.id) for item in artifacts
+        )
+    else:
+        linked_ids = set(
+            (
+                await session.scalars(
+                    select(TaskArtifact.artifact_id).where(
+                        TaskArtifact.task_id == task.id
+                    )
+                )
+            ).all()
+        )
+        if linked_ids != set(body.input.artifact_ids):
+            raise _api_error(409, "IDEMPOTENCY_CONFLICT", "幂等键已用于不同附件")
 
     try:
         command = await enqueue_command(
@@ -540,16 +600,23 @@ async def list_tasks(
         raise _api_error(403, "ACCESS_DENIED", "当前账号无权访问任务")
     if state is not None and state not in TASK_STATES:
         raise _api_error(422, "INPUT_INVALID", "任务状态筛选值无效")
-    if input_type is not None and input_type != "TEXT":
-        raise _api_error(422, "INPUT_INVALID", "当前版本只支持按文本任务筛选")
+    if input_type is not None and input_type not in {"TEXT", "TEXT_AND_FILES"}:
+        raise _api_error(422, "INPUT_INVALID", "任务输入类型筛选值无效")
     if not context.department_ids:
         return {
             "data": {"items": [], "next_cursor": None},
             "request_id": request_id(request),
         }
 
+    start_input_type = (
+        select(TaskCommand.payload["input_type"].as_string())
+        .where(TaskCommand.task_id == AgentTask.id, TaskCommand.kind == "START")
+        .order_by(TaskCommand.created_at, TaskCommand.id)
+        .limit(1)
+        .scalar_subquery()
+    )
     query = (
-        select(AgentTask, TaskSession.id, Draft.current_version)
+        select(AgentTask, TaskSession.id, Draft.current_version, start_input_type)
         .join(TaskSession, TaskSession.id == AgentTask.session_id)
         .outerjoin(Draft, Draft.task_id == AgentTask.id)
         .where(AgentTask.department_id.in_(context.department_ids))
@@ -557,15 +624,7 @@ async def list_tasks(
     if state:
         query = query.where(AgentTask.state == state)
     if input_type:
-        query = query.where(
-            select(TaskCommand.id)
-            .where(
-                TaskCommand.task_id == AgentTask.id,
-                TaskCommand.kind == "START",
-                TaskCommand.payload["input_type"].as_string() == input_type,
-            )
-            .exists()
-        )
+        query = query.where(start_input_type == input_type)
     if cursor:
         created_at, task_id = _decode_cursor(cursor)
         query = query.where(
@@ -590,9 +649,9 @@ async def list_tasks(
             task,
             draft_version=draft_version if draft_version else None,
             session_id=session_id,
-            input_type="TEXT",
+            input_type=task_input_type or "TEXT",
         )
-        for task, session_id, draft_version in rows
+        for task, session_id, draft_version, task_input_type in rows
     ]
     next_cursor = (
         _encode_cursor(rows[-1][0].created_at, rows[-1][0].id)
@@ -1291,6 +1350,109 @@ def _patch_candidate(current: CandidateOrder, patch: dict[str, Any]) -> Candidat
         raise _api_error(422, "INPUT_INVALID", "草稿修改字段格式无效") from exc
 
 
+def _file_confirmation_value(candidate: CandidateOrder, field_path: str) -> object:
+    """只返回证据面板允许映射至草稿的字段。"""
+    if field_path == "delivery_date":
+        return candidate.delivery_date.isoformat() if candidate.delivery_date else None
+    if field_path in {"address", "contact"}:
+        return getattr(candidate, field_path)
+    match = re.fullmatch(
+        r"items\[(\d+)]\.(raw_name|specification|quantity|unit|unit_price)",
+        field_path,
+    )
+    if match:
+        index = int(match.group(1))
+        if index >= len(candidate.items):
+            return None
+        value = getattr(candidate.items[index], match.group(2))
+        return str(value) if isinstance(value, Decimal) else value
+    raise _api_error(422, "EVIDENCE_FIELD_FORBIDDEN", "该识别字段不能直接写入草稿")
+
+
+async def _append_file_confirmation_evidence(
+    session: AsyncSession,
+    task: AgentTask,
+    candidate: CandidateOrder,
+    confirmations: list[FileFieldConfirmation],
+) -> CandidateOrder:
+    if not confirmations:
+        return candidate
+    paths = [item.field_path for item in confirmations]
+    artifact_ids = {item.artifact_id for item in confirmations}
+    if len(set(paths)) != len(paths):
+        raise _api_error(422, "EVIDENCE_CONFLICT", "同一字段只能确认一个来源候选")
+    artifacts = list(
+        (
+            await session.scalars(
+                select(InputArtifact)
+                .join(TaskArtifact, TaskArtifact.artifact_id == InputArtifact.id)
+                .where(
+                    TaskArtifact.task_id == task.id,
+                    InputArtifact.id.in_(artifact_ids),
+                    InputArtifact.department_id == task.department_id,
+                )
+            )
+        ).all()
+    )
+    by_id = {item.id: item for item in artifacts}
+    if len(by_id) != len(artifact_ids):
+        raise _api_error(404, "RESOURCE_NOT_FOUND", "来源附件不存在或未关联当前任务")
+
+    evidence = list(candidate.evidence)
+    for confirmation in confirmations:
+        artifact = by_id[confirmation.artifact_id]
+        if artifact.state != "STORED" or artifact.metadata_json.get(
+            "parse_intent"
+        ) not in {"contract_pdf", "receipt_image"}:
+            raise _api_error(415, "FILE_UNSUPPORTED", "该附件不能作为字段来源")
+        locator = confirmation.locator
+        locator_type = locator.get("type")
+        if locator_type == "text_range":
+            valid_locator = (
+                type(locator.get("start")) is int
+                and type(locator.get("end")) is int
+                and locator["start"] >= 0
+                and locator["end"] > locator["start"]
+            )
+        elif locator_type == "bbox":
+            valid_locator = (
+                all(
+                    type(locator.get(key)) is int
+                    for key in ("x", "y", "width", "height")
+                )
+                and locator["x"] >= 0
+                and locator["y"] >= 0
+                and locator["width"] > 0
+                and locator["height"] > 0
+            )
+        else:
+            valid_locator = False
+        if not valid_locator:
+            raise _api_error(422, "EVIDENCE_LOCATOR_INVALID", "来源页内定位信息无效")
+        if (
+            not isinstance(confirmation.raw_value, str)
+            or not confirmation.raw_value.strip()
+            or len(confirmation.raw_value) > 4000
+        ):
+            raise _api_error(422, "EVIDENCE_VALUE_INVALID", "识别原值格式无效")
+        accepted_value = _file_confirmation_value(candidate, confirmation.field_path)
+        if accepted_value is None:
+            raise _api_error(
+                422, "EVIDENCE_VALUE_INVALID", "请先将已确认值填入对应草稿字段"
+            )
+        evidence.append(
+            FieldEvidenceInput(
+                field_path=confirmation.field_path,
+                source_type=FieldSource.USER_EDIT,
+                artifact_id=artifact.id,
+                locator={**locator, "page_number": confirmation.page_number},
+                raw_value=confirmation.raw_value,
+                accepted_value=accepted_value,
+            )
+        )
+    return candidate.model_copy(update={"evidence": tuple(evidence)})
+
+
 async def _validate_material_adoptions(
     session: AsyncSession,
     current: CandidateOrder,
@@ -1389,6 +1551,9 @@ def _patch_command_payload(body: DraftPatchRequest) -> dict[str, object]:
         "operation": "DRAFT_PATCH",
         "text": f"用户已通过草稿编辑器保存字段修改：{patch_text}。请基于已保存草稿重新查询必要业务事实并校验；不要创建正式订单。",
         "patch": body.patch,
+        "file_confirmations": [
+            item.model_dump(mode="json") for item in body.file_confirmations
+        ],
         "expected_version": body.expected_version,
         "checkpoint_id": body.checkpoint_id,
     }
@@ -1508,6 +1673,9 @@ async def patch_task_draft(
         wait.pending_command_id = None
 
     candidate = _patch_candidate(snapshot.candidate, body.patch)
+    candidate = await _append_file_confirmation_evidence(
+        session, task, candidate, body.file_confirmations
+    )
     material_adoptions = await _validate_material_adoptions(
         session, snapshot.candidate, candidate
     )
@@ -1528,6 +1696,42 @@ async def patch_task_draft(
         )
     except DraftConflictError as exc:
         raise _api_error(409, exc.code, str(exc)) from exc
+    for confirmation in body.file_confirmations:
+        accepted_value = _file_confirmation_value(candidate, confirmation.field_path)
+        if not saved.created:
+            session.add(
+                FieldEvidence(
+                    id=uuid4(),
+                    draft_id=draft.id,
+                    version=saved.version,
+                    field_path=confirmation.field_path,
+                    source_type=FieldSource.USER_EDIT.value,
+                    artifact_id=confirmation.artifact_id,
+                    locator={
+                        **confirmation.locator,
+                        "page_number": confirmation.page_number,
+                    },
+                    raw_value=confirmation.raw_value,
+                    accepted_value=accepted_value,
+                    confirmed_by=context.user_id,
+                )
+            )
+        session.add(
+            AuditEvent(
+                id=uuid4(),
+                task_id=task.id,
+                actor_id=context.user_id,
+                action="draft.file_field_confirmed",
+                object_ref={
+                    "draft_id": str(draft.id),
+                    "version": saved.version,
+                    "artifact_id": str(confirmation.artifact_id),
+                    "field_path": confirmation.field_path,
+                    "page_number": confirmation.page_number,
+                },
+                result="SUCCEEDED",
+            )
+        )
     for item_index, previous, material in material_adoptions:
         input_digest = hashlib.sha256(
             "\x1f".join(
