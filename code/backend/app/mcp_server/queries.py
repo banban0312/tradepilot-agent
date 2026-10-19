@@ -194,10 +194,15 @@ async def match_materials(
         grade_specification = any(
             specification.startswith(term.casefold()) for term in grade_terms
         )
+        explicit_size = re.search(
+            r"\d+(?:\.\d+)?(?:mm|cm|厘米|米|m|kg|吨|t)(?:$|[^a-z])",
+            specification,
+            re.IGNORECASE,
+        )
         if (
             specification
             and specification not in normalized_spec
-            and not (grade_specification and grade_hit)
+            and not (grade_specification and grade_hit and explicit_size is None)
         ):
             continue
         if unit and unit != _normalize(material.unit):
