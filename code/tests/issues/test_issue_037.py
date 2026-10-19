@@ -379,6 +379,10 @@ async def test_contract_price_fallback_is_server_sourced_and_auditable() -> None
     assert evidence.source_type is FieldSource.MASTER_DATA
     assert evidence.locator == {"contract_line_id": str(line_id)}
     assert evidence.accepted_value == "3500.000000"
-    assert sum(
-        item.field_path == "items[0].unit_price" for item in saved_candidate.evidence
-    ) == 1
+    assert (
+        sum(
+            item.field_path == "items[0].unit_price"
+            for item in saved_candidate.evidence
+        )
+        == 1
+    )
