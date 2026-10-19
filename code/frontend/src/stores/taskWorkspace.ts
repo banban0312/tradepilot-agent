@@ -118,7 +118,8 @@ export const useTaskWorkspaceStore = defineStore('task-workspace', {
 
     async submitReply() {
       const current = this.task
-      const text = this.replyText.trim()
+      const submittedText = this.replyText
+      const text = submittedText.trim()
       if (
         !current
         || !text
@@ -129,7 +130,8 @@ export const useTaskWorkspaceStore = defineStore('task-workspace', {
       this.commandSubmitting = true
       try {
         await tasksApi.supplement(current, text)
-        this.replyText = ''
+        // 旧任务的慢响应不能清空切换后新任务刚输入的内容。
+        if (this.activeTaskId === current.task_id && this.replyText === submittedText) this.replyText = ''
         await this.refreshSnapshot(current.task_id)
         return true
       } catch (caught) {

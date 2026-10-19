@@ -175,4 +175,23 @@ describe('Issue #32 全屏与悬浮窗共享任务状态', () => {
     expect(workspace.commandSubmitting).toBe(false)
     expect(serviceMocks.supplement).toHaveBeenCalledTimes(1)
   })
+
+  it('旧任务的迟到成功响应不清空新任务的未发送文本', async () => {
+    serviceMocks.get.mockResolvedValueOnce(snapshot('task-1')).mockResolvedValueOnce(snapshot('task-2'))
+    let resolveSupplement!: () => void
+    serviceMocks.supplement.mockReturnValue(new Promise<void>((resolve) => { resolveSupplement = resolve }))
+    const workspace = useTaskWorkspaceStore()
+    await workspace.activateTask('task-1')
+    workspace.replyText = '旧任务补充'
+    const pendingSubmission = workspace.submitReply()
+
+    await workspace.activateTask('task-2')
+    workspace.replyText = '新任务未发送内容'
+    resolveSupplement()
+    await pendingSubmission
+
+    expect(workspace.activeTaskId).toBe('task-2')
+    expect(workspace.replyText).toBe('新任务未发送内容')
+    expect(workspace.commandSubmitting).toBe(false)
+  })
 })
