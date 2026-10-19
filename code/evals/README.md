@@ -83,3 +83,4 @@ uv run --frozen --project backend --directory code python -m pytest -q tests/iss
 在线结果和离线夹具结果必须分别运行、分别看 `mode`，不得汇总成一个模型质量分数。每例 JSONL 保存 expected、actual、失败断言、错误码、task/trace/span 引用和输入证据。
 - 参数校验统计以已进入实际 TOOL span 的请求计为通过，以 `function_calling.tool_argument_validation` RULE 错误 span 计为拒绝；没有相应 span 时不推测。
 - 字段评分只纳入固定数据集中标注的业务字段（或 `expected.field_labels` 显式指定项），如审批状态、重放次数等执行事实不混入字段提取准确率。
+- 预期值为 `null` 的抽取字段表示该等待态下字段本就未确认，故不纳入必评字段分母；预期非空但实际缺失仍计为遗漏并降低覆盖率。

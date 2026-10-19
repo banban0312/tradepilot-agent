@@ -444,7 +444,7 @@ def _quality_metrics(results: list[CaseResult]) -> dict[str, Any]:
     token_observations = token_unavailable = 0
     for result in results:
         expected = result.expected
-        fields = _leaf_values(_expected_field_values(expected))
+        fields = _required_field_leaves(expected)
         if result.status in {"PASS", "FAIL"}:
             actual_fields = result.actual.get("draft", {}).get("fields", {})
             evidence = result.actual.get("draft", {}).get("field_evidence", [])
@@ -581,7 +581,7 @@ def _quality_metrics(results: list[CaseResult]) -> dict[str, Any]:
                 result.status in {"SKIPPED", "ERROR"} for result in results
             ),
             "not_evaluated_required_fields": sum(
-                len(_leaf_values(_expected_field_values(result.expected)))
+                len(_required_field_leaves(result.expected))
                 for result in results
                 if result.status in {"SKIPPED", "ERROR"}
             ),
@@ -689,6 +689,14 @@ def _expected_field_values(expected: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in fields.items() if key in selected}
     return {
         key: value for key, value in fields.items() if key in _EXTRACTED_FIELD_NAMES
+    }
+
+
+def _required_field_leaves(expected: dict[str, Any]) -> dict[str, Any]:
+    return {
+        path: value
+        for path, value in _leaf_values(_expected_field_values(expected)).items()
+        if value is not None
     }
 
 
