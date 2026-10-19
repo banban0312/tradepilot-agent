@@ -8,7 +8,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -20,14 +20,26 @@ from app.auth.context import BUSINESS_OPERATOR, AuthContext, require_role
 from app.auth.dependencies import get_current_identity, request_id, require_csrf
 from app.config import settings
 from app.database import get_db_session
+from app.imports.batches import (
+    BatchIdempotencyConflict,
+    create_batch,
+    load_batch,
+    stop_batch,
+)
 from app.imports.service import TEMPLATE_HEADERS, preview_workbook
-from app.models import AuditEvent
+from app.models import AuditEvent, InputArtifact
 from app.storage.files import FileUploadError, storage_path
 
 router = APIRouter(prefix="/api/v1/imports", tags=["imports"])
 
 
 class PreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: UUID
+
+
+class CreateBatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     artifact_id: UUID
@@ -103,30 +115,7 @@ async def preview_import(
 ) -> dict[str, object]:
     require_role(context, BUSINESS_OPERATOR)
     artifact = await _readable_artifact(session, body.artifact_id, context)
-    if artifact.metadata_json.get("parse_intent") != "order_xlsx":
-        raise _api_error(415, "FILE_UNSUPPORTED", "请选择已上传的 XLSX 订单文件")
-    if artifact.state != "STORED":
-        raise _api_error(409, "ARTIFACT_NOT_READY", "附件当前不可解析，请重新上传")
-    try:
-        path = storage_path(settings.attachments_root, artifact.storage_key)
-    except FileUploadError as exc:
-        raise _api_error(exc.status_code or 503, exc.code, exc.message) from exc
-    if path.is_symlink() or not path.is_file():
-        raise _api_error(503, "FILE_UNREADABLE", "附件存储暂不可用")
-    digest = await anyio.to_thread.run_sync(
-        lambda: hashlib.sha256(path.read_bytes()).hexdigest()
-    )
-    if digest != artifact.sha256:
-        raise _api_error(503, "FILE_INTEGRITY_FAILED", "附件内容校验失败")
-    try:
-        data = await preview_workbook(
-            path,
-            artifact_id=artifact.id,
-            session=session,
-            department_ids=context.department_ids,
-        )
-    except ValueError as exc:
-        raise _api_error(413, "FILE_TOO_LARGE", str(exc)) from exc
+    data = await _preview_artifact(artifact, context=context, session=session)
     session.add(
         AuditEvent(
             id=uuid4(),
@@ -145,3 +134,93 @@ async def preview_import(
     )
     await session.commit()
     return {"data": data, "request_id": request_id(request)}
+
+
+async def _preview_artifact(
+    artifact: InputArtifact, *, context: AuthContext, session: AsyncSession
+) -> dict[str, object]:
+    """创建批次前重做完整性与业务预览，不能信任客户端提交的预览结果。"""
+    if artifact.metadata_json.get("parse_intent") != "order_xlsx":
+        raise _api_error(415, "FILE_UNSUPPORTED", "请选择已上传的 XLSX 订单文件")
+    if artifact.state != "STORED":
+        raise _api_error(409, "ARTIFACT_NOT_READY", "附件当前不可解析，请重新上传")
+    try:
+        path = storage_path(settings.attachments_root, artifact.storage_key)
+    except FileUploadError as exc:
+        raise _api_error(exc.status_code or 503, exc.code, exc.message) from exc
+    if path.is_symlink() or not path.is_file():
+        raise _api_error(503, "FILE_UNREADABLE", "附件存储暂不可用")
+    digest = await anyio.to_thread.run_sync(
+        lambda: hashlib.sha256(path.read_bytes()).hexdigest()
+    )
+    if digest != artifact.sha256:
+        raise _api_error(503, "FILE_INTEGRITY_FAILED", "附件内容校验失败")
+    try:
+        return await preview_workbook(
+            path,
+            artifact_id=artifact.id,
+            session=session,
+            department_ids=context.department_ids,
+        )
+    except ValueError as exc:
+        raise _api_error(413, "FILE_TOO_LARGE", str(exc)) from exc
+
+
+@router.post("", status_code=202)
+async def create_import_batch(
+    body: CreateBatchRequest,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+) -> dict[str, object]:
+    key = idempotency_key.strip()
+    if not key or len(key) > 128:
+        raise _api_error(422, "INPUT_INVALID", "幂等键长度必须为 1 至 128 个字符")
+    artifact = await _readable_artifact(session, body.artifact_id, context)
+    if artifact.owner_id != context.user_id:
+        raise _api_error(404, "RESOURCE_NOT_FOUND", "附件不存在")
+    data = await _preview_artifact(artifact, context=context, session=session)
+    groups = data["groups"]
+    if not isinstance(groups, list) or not groups:
+        raise _api_error(422, "IMPORT_NOT_READY", "Excel 中没有可建立批次的订单组")
+    try:
+        batch, replayed = await create_batch(
+            session,
+            context=context,
+            artifact=artifact,
+            groups=groups,
+            idempotency_key=key,
+        )
+    except BatchIdempotencyConflict as exc:
+        raise _api_error(409, "IDEMPOTENCY_CONFLICT", str(exc)) from exc
+    except (TypeError, ValueError) as exc:
+        raise _api_error(409, "IMPORT_CHANGED", str(exc)) from exc
+    await session.commit()
+    result = await load_batch(session, batch_id=batch.id, context=context)
+    await session.commit()
+    return {"data": result, "replayed": replayed, "request_id": request_id(request)}
+
+
+@router.get("/{batch_id}")
+async def get_import_batch(
+    batch_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(get_current_identity)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    result = await load_batch(session, batch_id=batch_id, context=context)
+    await session.commit()
+    return {"data": result, "request_id": request_id(request)}
+
+
+@router.post("/{batch_id}/stop")
+async def stop_import_batch(
+    batch_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    result = await stop_batch(session, batch_id=batch_id, context=context)
+    await session.commit()
+    return {"data": result, "request_id": request_id(request)}
