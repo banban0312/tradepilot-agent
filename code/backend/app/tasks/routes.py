@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
 import time
@@ -11,7 +12,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -37,17 +38,22 @@ from app.drafts.service import (
 )
 from app.drafts.types import (
     CandidateOrder,
+    CandidateOrderItem,
     FieldEvidenceInput,
     FieldSource,
     candidate_amounts,
 )
+from app.mcp_server.contracts import MatchMaterialInput
+from app.mcp_server.queries import match_materials
 from app.models import (
     AgentTask,
+    AuditEvent,
     AuthSession,
     Contract,
     ContractBalance,
     Department,
     Draft,
+    Material,
     Order,
     TaskApproval,
     TaskCommand,
@@ -129,6 +135,18 @@ class DraftPatchRequest(StrictModel):
     interrupt_id: str = Field(min_length=1, max_length=256)
     checkpoint_id: str = Field(min_length=1, max_length=256)
     patch: dict[str, Any] = Field(min_length=1, max_length=32)
+
+
+class MaterialMatchRequest(StrictModel):
+    expected_version: int = Field(ge=1)
+    item_index: int = Field(ge=0, le=99)
+
+
+class MaterialDecisionRequest(StrictModel):
+    expected_version: int = Field(ge=1)
+    item_index: int = Field(ge=0, le=99)
+    candidate_material_id: UUID
+    decision: Literal["REJECT"]
 
 
 class TaskReviewRequest(StrictModel):
@@ -217,6 +235,162 @@ def _review_accepted_response(
             "state": state,
             "status_url": _status_url(task_id),
         }
+    }
+
+
+async def _editable_task_draft(
+    session: AsyncSession,
+    task_id: UUID,
+    context: AuthContext,
+    expected_version: int,
+    *,
+    lock: bool = False,
+):
+    """只允许经办人查看当前有效等待点下的物料匹配和决定候选。"""
+    task = await _visible_task(session, task_id, context, lock=lock)
+    _require_task_operator(context)
+    if task.state not in {"WAITING_INPUT", "BLOCKED_RULE", "QUEUED"}:
+        raise _api_error(409, "TASK_NOT_WAITING", "当前任务不允许确认物料")
+    wait_query = select(TaskWait).where(TaskWait.task_id == task.id, TaskWait.active)
+    if lock:
+        wait_query = wait_query.with_for_update()
+    wait = await session.scalar(wait_query)
+    input_wait = (
+        wait is not None
+        and wait.kind == "INPUT"
+        and task.state in {"WAITING_INPUT", "BLOCKED_RULE"}
+    )
+    pending_review = (
+        wait is not None
+        and wait.kind == "APPROVAL"
+        and task.state == "QUEUED"
+        and wait.pending_command_id is not None
+    )
+    if not (input_wait or pending_review):
+        raise _api_error(409, "TASK_NOT_WAITING", "当前任务不允许确认物料")
+    if pending_review:
+        command = await session.get(TaskCommand, wait.pending_command_id)
+        job = await session.scalar(
+            select(TaskJob).where(
+                TaskJob.command_id == wait.pending_command_id,
+                TaskJob.kind == "RUN_TASK",
+            )
+        )
+        if (
+            command is None
+            or command.kind != "REVIEW"
+            or command.state != "READY"
+            or job is None
+            or job.state != "READY"
+        ):
+            raise _api_error(409, "WAIT_CONFLICT", "审批已开始处理，请刷新任务")
+    draft_query = select(Draft).where(Draft.task_id == task.id)
+    if lock:
+        draft_query = draft_query.with_for_update()
+    draft = await session.scalar(draft_query)
+    snapshot = await load_draft(session, draft.id) if draft is not None else None
+    if (
+        snapshot is None
+        or snapshot.candidate is None
+        or wait is None
+        or snapshot.version != expected_version
+        or wait.draft_version != expected_version
+    ):
+        raise _api_error(409, "VERSION_CONFLICT", "草稿版本已变化，请刷新任务")
+    return task, wait, draft, snapshot
+
+
+def _material_input(item) -> MatchMaterialInput:
+    if item.raw_name is None or not item.raw_name.strip():
+        raise _api_error(422, "MATERIAL_NAME_REQUIRED", "请先补充物料原始名称")
+    return MatchMaterialInput(
+        raw_name=item.raw_name,
+        specification=item.specification,
+        unit=item.unit,
+    )
+
+
+@router.post("/{task_id}/material-matches")
+async def list_task_material_matches(
+    task_id: UUID,
+    body: MaterialMatchRequest,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    """通过 M2-03 的真实数据库匹配查询，供经办人明确选择物料候选。"""
+    _, _, _, snapshot = await _editable_task_draft(
+        session, task_id, context, body.expected_version
+    )
+    if body.item_index >= len(snapshot.candidate.items):
+        raise _api_error(404, "RESOURCE_NOT_FOUND", "草稿明细不存在")
+    result = await match_materials(
+        session, _material_input(snapshot.candidate.items[body.item_index])
+    )
+    return {
+        "data": result.model_dump(mode="json"),
+        "request_id": request_id(request),
+    }
+
+
+@router.post("/{task_id}/material-decisions")
+async def record_task_material_decision(
+    task_id: UUID,
+    body: MaterialDecisionRequest,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_csrf)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    """拒绝动作只写追加审计；不会把任一候选应用到草稿。"""
+    task, _, draft, snapshot = await _editable_task_draft(
+        session, task_id, context, body.expected_version, lock=True
+    )
+    if body.item_index >= len(snapshot.candidate.items):
+        raise _api_error(404, "RESOURCE_NOT_FOUND", "草稿明细不存在")
+    item = snapshot.candidate.items[body.item_index]
+    result = await match_materials(session, _material_input(item))
+    candidate = next(
+        (
+            row
+            for row in result.data.candidates
+            if row.material_id == body.candidate_material_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise _api_error(
+            409, "MATERIAL_CANDIDATE_STALE", "该物料已不在当前候选中，请重新查询"
+        )
+    input_digest = hashlib.sha256(
+        "\x1f".join(
+            (item.raw_name or "", item.specification or "", item.unit or "")
+        ).encode()
+    ).hexdigest()
+    session.add(
+        AuditEvent(
+            id=uuid4(),
+            task_id=task.id,
+            actor_id=context.user_id,
+            action="material.candidate.rejected",
+            object_ref={
+                "draft_id": str(draft.id),
+                "item_index": body.item_index,
+                "draft_version": snapshot.version,
+            },
+            before_ref={"raw_name_sha256": input_digest},
+            after_ref={
+                "decision": body.decision,
+                "candidate_material_id": str(candidate.material_id),
+                "candidate_code": candidate.code,
+            },
+            result="SUCCEEDED",
+            input_hash=input_digest,
+        )
+    )
+    await session.commit()
+    return {
+        "data": {"decision": body.decision, "draft_version": snapshot.version},
+        "request_id": request_id(request),
     }
 
 
@@ -1117,6 +1291,96 @@ def _patch_candidate(current: CandidateOrder, patch: dict[str, Any]) -> Candidat
         raise _api_error(422, "INPUT_INVALID", "草稿修改字段格式无效") from exc
 
 
+async def _validate_material_adoptions(
+    session: AsyncSession,
+    current: CandidateOrder,
+    updated: CandidateOrder,
+) -> list[tuple[int, CandidateOrderItem, Material]]:
+    """只接受当前真实匹配结果中的有效物料，并使用主数据规范规格和单位。"""
+    adoptions: list[tuple[int, CandidateOrderItem, Material]] = []
+    for index, item in enumerate(updated.items):
+        previous = current.items[index] if index < len(current.items) else None
+        if item.material_id is None or (
+            previous
+            and previous.material_id == item.material_id
+            and previous.raw_name == item.raw_name
+            and previous.specification == item.specification
+            and previous.unit == item.unit
+        ):
+            continue
+        result = await match_materials(session, _material_input(item))
+        matched = next(
+            (
+                row
+                for row in result.data.candidates
+                if row.material_id == item.material_id
+            ),
+            None,
+        )
+        if matched is None:
+            raise _api_error(
+                422,
+                "MATERIAL_CANDIDATE_INVALID",
+                "所选物料不属于当前名称、规格和单位的匹配候选",
+            )
+        material = await session.scalar(
+            select(Material).where(Material.id == item.material_id).with_for_update()
+        )
+        if (
+            material is None
+            or not material.active
+            or item.specification != material.specification
+            or item.unit != material.unit
+        ):
+            raise _api_error(
+                409, "MATERIAL_CANDIDATE_STALE", "物料状态或规范规格已变化，请重新匹配"
+            )
+        adoptions.append((index, previous, material))
+    return adoptions
+
+
+def _append_material_adoption_evidence(
+    candidate: CandidateOrder,
+    adoptions: list[tuple[int, CandidateOrderItem, Material]],
+) -> CandidateOrder:
+    if not adoptions:
+        return candidate
+    evidence = list(candidate.evidence)
+    for index, previous, material in adoptions:
+        expected_paths = {f"items[{index}].raw_name", f"items.{index}.raw_name"}
+        source = next(
+            (
+                row
+                for row in reversed(candidate.evidence)
+                if row.artifact_id is not None
+                and row.field_path in expected_paths
+                and row.raw_value == previous.raw_name
+            ),
+            None,
+        )
+        evidence.append(
+            FieldEvidenceInput(
+                field_path=f"items[{index}].material_id",
+                source_type=FieldSource.USER_EDIT,
+                artifact_id=source.artifact_id if source else None,
+                message_id=source.message_id if source else None,
+                locator=source.locator if source else None,
+                raw_value={
+                    "raw_name": previous.raw_name,
+                    "specification": previous.specification,
+                },
+                accepted_value={
+                    "material_id": str(material.id),
+                    "code": material.code,
+                    "name": material.name,
+                    "specification": material.specification,
+                    "unit": material.unit,
+                },
+            )
+        )
+    return candidate.model_copy(update={"evidence": tuple(evidence)})
+
+
 def _patch_command_payload(body: DraftPatchRequest) -> dict[str, object]:
     patch_text = json.dumps(
         body.patch, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -1244,6 +1508,10 @@ async def patch_task_draft(
         wait.pending_command_id = None
 
     candidate = _patch_candidate(snapshot.candidate, body.patch)
+    material_adoptions = await _validate_material_adoptions(
+        session, snapshot.candidate, candidate
+    )
+    candidate = _append_material_adoption_evidence(candidate, material_adoptions)
     if candidate.contract_id is not None:
         # 仅同步校验合同部门范围；客户、物料和额度等规则由恢复后的图异步复核。
         contract = await session.get(Contract, candidate.contract_id)
@@ -1260,6 +1528,39 @@ async def patch_task_draft(
         )
     except DraftConflictError as exc:
         raise _api_error(409, exc.code, str(exc)) from exc
+    for item_index, previous, material in material_adoptions:
+        input_digest = hashlib.sha256(
+            "\x1f".join(
+                (
+                    previous.raw_name or "",
+                    previous.specification or "",
+                    previous.unit or "",
+                )
+            ).encode()
+        ).hexdigest()
+        session.add(
+            AuditEvent(
+                id=uuid4(),
+                task_id=task.id,
+                actor_id=context.user_id,
+                action="material.candidate.accepted",
+                object_ref={
+                    "draft_id": str(draft.id),
+                    "item_index": item_index,
+                    "draft_version": saved.version,
+                },
+                before_ref={"raw_name_sha256": input_digest},
+                after_ref={
+                    "material_id": str(material.id),
+                    "code": material.code,
+                    "name": material.name,
+                    "specification": material.specification,
+                    "unit": material.unit,
+                },
+                result="SUCCEEDED",
+                input_hash=input_digest,
+            )
+        )
     wait.draft_version = saved.version
     wait.payload = {
         **wait.payload,

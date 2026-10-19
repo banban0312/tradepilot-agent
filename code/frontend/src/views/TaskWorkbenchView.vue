@@ -5,7 +5,7 @@ import AppIcon from '../components/AppIcon.vue'
 import NoticeBanner from '../components/NoticeBanner.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { useAuthStore } from '../stores/auth'
-import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
+import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
 
 type WorkEvent = { type: string; seq: number; emitted_at: string; data: Record<string, unknown> }
 
@@ -18,6 +18,9 @@ const replyText = ref('')
 const taskList = ref<TaskSummary[]>([])
 const task = ref<TaskSnapshot | null>(null)
 const draftForm = ref<DraftCandidate | null>(null)
+const materialMatches = ref<Record<number, MaterialMatchResult>>({})
+const matchingItems = ref(new Set<number>())
+const materialDecisions = ref(new Set<string>())
 const savedForm = ref('')
 const activity = ref<WorkEvent[]>([])
 const loading = ref(false)
@@ -180,6 +183,9 @@ function syncFormFromTask(snapshot: TaskSnapshot, force = false) {
     keepLocalDraft.value = true
     return
   }
+  materialMatches.value = {}
+  matchingItems.value.clear()
+  materialDecisions.value.clear()
   draftForm.value = structuredClone(candidate)
   savedForm.value = JSON.stringify(editableCandidate(draftForm.value))
   keepLocalDraft.value = false
@@ -379,6 +385,46 @@ async function saveDraft() {
   }
 }
 
+async function findMaterialMatches(index: number) {
+  if (!task.value || !canEditDraft.value || isDirty.value || matchingItems.value.has(index)) return
+  matchingItems.value.add(index)
+  errorMessage.value = ''
+  try {
+    materialMatches.value[index] = await tasksApi.matchMaterials(task.value, index)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '物料候选查询失败。'
+    if ((error as { status?: number }).status === 409) await refreshSnapshot()
+  } finally {
+    matchingItems.value.delete(index)
+  }
+}
+
+async function acceptMaterialCandidate(index: number, candidate: MaterialCandidate) {
+  if (!draftForm.value || !canEditDraft.value || saving.value || isDirty.value) return
+  const item = draftForm.value.items[index]
+  if (!item) return
+  item.material_id = candidate.material_id
+  item.specification = candidate.specification
+  item.unit = candidate.unit
+  await nextTick()
+  await saveDraft()
+}
+
+async function rejectMaterialCandidate(index: number, candidate: MaterialCandidate) {
+  if (!task.value || !canEditDraft.value || isDirty.value) return
+  const key = `${index}:${candidate.material_id}`
+  if (materialDecisions.value.has(key)) return
+  materialDecisions.value.add(key)
+  try {
+    await tasksApi.rejectMaterial(task.value, index, candidate.material_id)
+    noticeMessage.value = `已记录拒绝候选 ${candidate.code}。草稿未被修改，仍需选择其他候选或补充规格。`
+  } catch (error) {
+    materialDecisions.value.delete(key)
+    errorMessage.value = error instanceof Error ? error.message : '记录物料决定失败。'
+    if ((error as { status?: number }).status === 409) await refreshSnapshot()
+  }
+}
+
 function addItem() {
   if (!draftForm.value) return
   draftForm.value.items.push({ material_id: null, raw_name: null, specification: null, quantity: null, unit: null, unit_price: null })
@@ -575,14 +621,31 @@ async function openTask(taskId: string) {
               <div class="draft-items-heading"><div><h3>产品明细</h3><p>编辑后需保存并由服务端重新校验</p></div><button v-if="canEditDraft" class="text-button" type="button" @click="addItem">＋ 添加一行</button></div>
               <div class="draft-items-wrap">
                 <table class="draft-items-table"><thead><tr><th>物料 / 规格</th><th>数量 / 单位</th><th>单价</th><th>金额</th><th v-if="canEditDraft"></th></tr></thead>
-                  <tbody><tr v-for="(item, index) in draftForm.items" :key="`${index}:${item.material_id ?? item.raw_name}`">
-                    <td><input v-model="item.raw_name" :disabled="!canEditDraft" aria-label="物料名称" placeholder="物料名称" /><input v-model="item.specification" :disabled="!canEditDraft" aria-label="物料规格" placeholder="规格" class="draft-sub-input" /></td>
-                    <td class="quantity-cell"><input v-model="item.quantity" :disabled="!canEditDraft" inputmode="decimal" aria-label="数量" placeholder="数量" /><input v-model="item.unit" :disabled="!canEditDraft" aria-label="单位" placeholder="单位" /></td>
-                    <td><input v-model="item.unit_price" :disabled="!canEditDraft" inputmode="decimal" aria-label="单价" placeholder="单价" /></td>
-                    <td class="draft-line-amount">{{ lineAmount(item) ? formatMoney(lineAmount(item)) : '待核算' }}</td>
-                    <td v-if="canEditDraft"><button class="remove-item-button" type="button" :aria-label="`删除第 ${index + 1} 行`" @click="removeItem(index)">×</button></td>
-                  </tr>
-                  <tr v-if="!draftForm.items.length"><td class="draft-table-empty" :colspan="canEditDraft ? 5 : 4">当前草稿尚无产品行；缺失字段以服务端校验为准。</td></tr></tbody>
+                  <tbody>
+                    <template v-for="(item, index) in draftForm.items" :key="`${index}:${item.material_id ?? item.raw_name}`">
+                      <tr>
+                        <td><input v-model="item.raw_name" :disabled="!canEditDraft" aria-label="物料名称" placeholder="物料名称" /><input v-model="item.specification" :disabled="!canEditDraft" aria-label="物料规格" placeholder="规格" class="draft-sub-input" /><button v-if="canEditDraft" class="material-match-trigger" type="button" :disabled="isDirty || saving || matchingItems.has(index)" @click="findMaterialMatches(index)">{{ matchingItems.has(index) ? '查询中…' : '匹配标准物料' }}</button><small v-if="isDirty" class="material-match-hint">先保存当前编辑，再查询候选</small></td>
+                        <td class="quantity-cell"><input v-model="item.quantity" :disabled="!canEditDraft" inputmode="decimal" aria-label="数量" placeholder="数量" /><input v-model="item.unit" :disabled="!canEditDraft" aria-label="单位" placeholder="单位" /></td>
+                        <td><input v-model="item.unit_price" :disabled="!canEditDraft" inputmode="decimal" aria-label="单价" placeholder="单价" /></td>
+                        <td class="draft-line-amount">{{ lineAmount(item) ? formatMoney(lineAmount(item)) : '待核算' }}</td>
+                        <td v-if="canEditDraft"><button class="remove-item-button" type="button" :aria-label="`删除第 ${index + 1} 行`" @click="removeItem(index)">×</button></td>
+                      </tr>
+                      <tr v-if="materialMatches[index]" :key="`matches-${index}-${task.draft.version}`" class="material-match-result-row">
+                        <td :colspan="canEditDraft ? 5 : 4">
+                          <div class="material-match-result">
+                            <div class="material-match-result__heading"><strong>{{ item.raw_name || '物料' }} → 标准物料候选</strong><span>{{ materialMatches[index].data.candidates.length ? `找到 ${materialMatches[index].data.candidates.length} 个候选` : '没有匹配候选' }}</span></div>
+                            <NoticeBanner v-for="issue in materialMatches[index].issues" :key="issue.code" tone="warning" :message="issue.message" />
+                            <p v-if="!materialMatches[index].data.candidates.length" class="material-match-empty">请补充或修正名称、规格和单位后再查询。</p>
+                            <div v-for="candidate in materialMatches[index].data.candidates" :key="candidate.material_id" class="material-match-candidate" :class="{ 'material-match-candidate--selected': item.material_id === candidate.material_id }">
+                              <div class="material-match-candidate__detail"><strong>{{ candidate.code }} · {{ candidate.name }}</strong><span>{{ candidate.specification || '规格待确认' }} · {{ candidate.unit || '单位待确认' }}</span><small>{{ candidate.reason }}<template v-if="candidate.requires_confirmation"> · 仍需人工确认</template></small></div>
+                              <div v-if="canEditDraft" class="material-match-candidate__actions"><button class="material-match-accept" type="button" :disabled="isDirty || saving || item.material_id === candidate.material_id" @click="acceptMaterialCandidate(index, candidate)">{{ saving && item.material_id === candidate.material_id ? '正在应用…' : item.material_id === candidate.material_id ? '已采纳' : '采纳并重新校验' }}</button><button class="material-match-reject" type="button" :disabled="isDirty || saving || materialDecisions.has(`${index}:${candidate.material_id}`)" @click="rejectMaterialCandidate(index, candidate)">{{ materialDecisions.has(`${index}:${candidate.material_id}`) ? '已记录拒绝' : '拒绝候选' }}</button></div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                    <tr v-if="!draftForm.items.length"><td class="draft-table-empty" :colspan="canEditDraft ? 5 : 4">当前草稿尚无产品行；缺失字段以服务端校验为准。</td></tr>
+                  </tbody>
                 </table>
               </div>
               <div class="draft-total-row"><span>草稿总金额 <small>{{ isDirty ? '本地精确试算 · 尚未通过服务端重校' : '服务端金额' }}</small></span><strong>{{ formatMoney(totalAmount) }}<small> {{ draftForm.currency }}</small></strong></div>

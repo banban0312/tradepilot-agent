@@ -304,6 +304,23 @@ a { color: inherit; text-decoration: none; }
 .draft-items-table .draft-sub-input { margin-top: 4px; color: var(--color-muted); }
 .draft-items-table .quantity-cell { display: flex; gap: 4px; }
 .draft-items-table .quantity-cell input:first-child { min-width: 57px; }
+.material-match-trigger { margin-top: 5px; padding: 3px 5px; border: 1px solid #c7dce2; border-radius: 3px; background: #f4fafb; color: #087f8c; font-size: 9px; cursor: pointer; }
+.material-match-trigger:disabled { color: #8a9ca3; cursor: not-allowed; }
+.material-match-hint { display: block; margin-top: 4px; color: #9a6a16; }
+.material-match-result-row td { padding: 9px !important; background: #f8fbfc; }
+.material-match-result { display: grid; gap: 7px; }
+.material-match-result__heading { display: flex; justify-content: space-between; gap: 8px; color: #284453; }
+.material-match-result__heading span, .material-match-empty { color: var(--color-muted); }
+.material-match-candidate { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid #dfe8eb; border-radius: 4px; background: #fff; }
+.material-match-candidate--selected { border-color: #087f8c; background: #eaf7f8; }
+.material-match-candidate__detail { display: grid; gap: 3px; min-width: 0; }
+.material-match-candidate__detail strong { color: #183544; }
+.material-match-candidate__detail span { color: #405b6a; }
+.material-match-candidate__detail small { color: var(--color-muted); }
+.material-match-candidate__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.material-match-accept, .material-match-reject { padding: 5px 7px; border: 1px solid #c7dce2; border-radius: 3px; background: #fff; color: #087f8c; font-size: 9px; cursor: pointer; }
+.material-match-accept { background: #087f8c; border-color: #087f8c; color: #fff; }
+.material-match-accept:disabled, .material-match-reject:disabled { opacity: .55; cursor: not-allowed; }
 .draft-line-amount { white-space: nowrap; }
 .draft-table-empty { padding: 16px !important; color: var(--color-muted) !important; text-align: center; }
 .remove-item-button { width: 22px; height: 22px; border: 0; border-radius: 3px; background: #fff0f0; color: var(--color-danger); cursor: pointer; }

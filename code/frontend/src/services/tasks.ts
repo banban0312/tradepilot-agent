@@ -21,6 +21,22 @@ export type DraftItem = {
   unit_price: string | null
 }
 
+export type MaterialCandidate = {
+  material_id: string
+  code: string
+  name: string
+  specification: string | null
+  unit: string | null
+  reason: string
+  requires_confirmation: boolean
+}
+
+export type MaterialMatchResult = {
+  data: { candidates: MaterialCandidate[] }
+  issues: Array<{ code: string; message: string }>
+  refs: string[]
+}
+
 export type DraftCandidate = {
   order_type: OrderType | null
   contract_id: string | null
@@ -186,6 +202,29 @@ export const tasksApi = {
         interrupt_id: wait.interrupt_id,
         checkpoint_id: wait.checkpoint_id,
         patch,
+      }),
+    })
+  },
+  matchMaterials: (task: TaskSnapshot, itemIndex: number) => {
+    if (!task.draft || !task.available_actions.includes('EDIT_DRAFT')) {
+      throw new Error('当前任务不能确认物料，请刷新后重试。')
+    }
+    return request<MaterialMatchResult>(`/api/v1/tasks/${encodeURIComponent(task.task_id)}/material-matches`, {
+      method: 'POST',
+      body: JSON.stringify({ expected_version: task.draft.version, item_index: itemIndex }),
+    })
+  },
+  rejectMaterial: (task: TaskSnapshot, itemIndex: number, candidateMaterialId: string) => {
+    if (!task.draft || !task.available_actions.includes('EDIT_DRAFT')) {
+      throw new Error('当前任务不能记录物料决定，请刷新后重试。')
+    }
+    return request<Record<string, unknown>>(`/api/v1/tasks/${encodeURIComponent(task.task_id)}/material-decisions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        expected_version: task.draft.version,
+        item_index: itemIndex,
+        candidate_material_id: candidateMaterialId,
+        decision: 'REJECT',
       }),
     })
   },
