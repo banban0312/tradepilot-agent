@@ -58,6 +58,11 @@ class BackendCaseExecutor:
                 Path(__file__).resolve().parent / "fixtures/v1/master_data.json"
             ).read_text(encoding="utf-8")
         )
+        self.file_fixtures = json.loads(
+            (Path(__file__).resolve().parent / "fixtures/v1/index.json").read_text(
+                encoding="utf-8"
+            )
+        ).get("files", {})
         model_fixture_path = (
             Path(__file__).resolve().parent / "fixtures/v1/model_responses.json"
         )
@@ -126,7 +131,10 @@ class BackendCaseExecutor:
             and not duplicate_replay_case
         ):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
-        if case.get("input", {}).get("kind") != "text":
+        input_kind = case.get("input", {}).get("kind")
+        if input_kind == "file":
+            return await self._execute_file_case(case)
+        if input_kind != "text":
             raise CaseSkipped("EVAL_FILE_INPUT_NOT_SUPPORTED")
         if mode == "offline":
             fixture = self.model_fixtures.get("cases", {}).get(case["id"])
@@ -153,6 +161,199 @@ class BackendCaseExecutor:
         return await self._execute_task(
             case, model_client_factory=None, model_execution_mode="LIVE"
         )
+
+    async def _execute_file_case(self, case: dict) -> dict:
+        """用真实附件上传/导入接口执行固定文件输入，不伪装成 Agent 任务。"""
+        fixture_id = case["input"].get("fixture_id")
+        fixture = self.file_fixtures.get(fixture_id)
+        if not isinstance(fixture, dict):
+            raise CaseSkipped("EVAL_FILE_FIXTURE_UNAVAILABLE")
+
+        fixture_root = Path(__file__).resolve().parent / "fixtures/v1"
+        path = (fixture_root / fixture["path"]).resolve()
+        if not path.is_relative_to(fixture_root.resolve()) or not path.is_file():
+            raise ValueError("评测文件夹具路径无效")
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != fixture.get("sha256"):
+            raise ValueError("评测文件夹具摘要与索引不一致")
+
+        from app.database import async_session_factory
+        from app.models import Order, QuotaOccupation, TaskApproval
+
+        counts_before = await self._business_side_effect_counts(
+            async_session_factory, Order, TaskApproval, QuotaOccupation
+        )
+        actor = await self._seed_file_eval_operator(async_session_factory)
+        async with httpx.AsyncClient(
+            base_url=self.api_url,
+            timeout=httpx.Timeout(self.settings.model_timeout_seconds + 30),
+            headers={"Origin": self.settings.app_origin or "http://localhost"},
+        ) as client:
+            response = await client.post(
+                "/api/v1/auth/login",
+                json={
+                    "login": actor["login"],
+                    "password": self.settings.demo_password.get_secret_value(),
+                },
+            )
+            response.raise_for_status()
+            client.headers["X-CSRF-Token"] = response.json()["data"]["csrf_token"]
+
+            parse_intent = (
+                "order_xlsx" if fixture_id == "mixed_batch" else "contract_pdf"
+            )
+            upload_response = await client.post(
+                "/api/v1/artifacts",
+                data={"parse_intent": parse_intent},
+                files={
+                    "file": (
+                        path.name,
+                        content,
+                        fixture["media_type"],
+                    )
+                },
+            )
+            upload_status = upload_response.status_code
+            upload_payload = upload_response.json()
+            upload_error = upload_payload.get("error", upload_payload.get("detail"))
+            if not isinstance(upload_error, dict):
+                upload_error = {}
+            artifact_data = upload_payload.get("data")
+            artifact_data = artifact_data if isinstance(artifact_data, dict) else {}
+
+            preview_data: dict = {}
+            if fixture_id == "mixed_batch":
+                upload_response.raise_for_status()
+                artifact_id = artifact_data.get("artifact_id")
+                if not isinstance(artifact_id, str):
+                    raise RuntimeError("XLSX 上传响应缺少附件 ID")
+                preview_response = await client.post(
+                    "/api/v1/imports/preview", json={"artifact_id": artifact_id}
+                )
+                preview_response.raise_for_status()
+                preview_data = preview_response.json()["data"]
+
+        counts_after = await self._business_side_effect_counts(
+            async_session_factory, Order, TaskApproval, QuotaOccupation
+        )
+        group_rows = {
+            str(group["group_id"]): list(group.get("rows", []))
+            for group in preview_data.get("groups", [])
+        }
+        group_ids_by_status = {
+            status: sorted(
+                str(group["group_id"])
+                for group in preview_data.get("groups", [])
+                if group.get("status") == status
+            )
+            for status in ("READY_FOR_REVIEW", "NEEDS_CORRECTION", "OVER_QUOTA_REVIEW")
+        }
+        return {
+            "artifact": {
+                "fixture_id": fixture_id,
+                "media_type": fixture["media_type"],
+                "sha256": digest,
+                "upload_status_code": upload_status,
+                "upload_error_code": upload_error.get("code"),
+                "state": artifact_data.get("state"),
+            },
+            "preview": {
+                "summary": preview_data.get("summary", {}),
+                "fields": {
+                    "group_rows": group_rows,
+                    "ready_group_ids": group_ids_by_status["READY_FOR_REVIEW"],
+                    "needs_correction_group_ids": group_ids_by_status[
+                        "NEEDS_CORRECTION"
+                    ],
+                    "over_quota_group_ids": group_ids_by_status["OVER_QUOTA_REVIEW"],
+                },
+            },
+            "trace": {"model_tool_names": []},
+            "database": {
+                "orders": counts_after["orders"] - counts_before["orders"],
+                "approvals": counts_after["approvals"] - counts_before["approvals"],
+                "quota_occupations": counts_after["quota_occupations"]
+                - counts_before["quota_occupations"],
+                "occupied_amount_delta": format(
+                    counts_after["occupied_amount"] - counts_before["occupied_amount"],
+                    ".2f",
+                ),
+            },
+        }
+
+    @staticmethod
+    async def _business_side_effect_counts(
+        session_factory, Order, TaskApproval, QuotaOccupation
+    ) -> dict[str, int | Decimal]:
+        """记录文件解析前后业务副作用计数，不把附件与审计记录当作订单副作用。"""
+        async with session_factory() as session:
+            return {
+                "orders": int(
+                    await session.scalar(select(func.count()).select_from(Order)) or 0
+                ),
+                "approvals": int(
+                    await session.scalar(select(func.count()).select_from(TaskApproval))
+                    or 0
+                ),
+                "quota_occupations": int(
+                    await session.scalar(
+                        select(func.count()).select_from(QuotaOccupation)
+                    )
+                    or 0
+                ),
+                "occupied_amount": Decimal(
+                    str(
+                        await session.scalar(
+                            select(func.coalesce(func.sum(QuotaOccupation.amount), 0))
+                        )
+                        or 0
+                    )
+                ),
+            }
+
+    async def _seed_file_eval_operator(self, session_factory) -> dict[str, str]:
+        """建立仅供隔离文件案例使用的最小操作员身份。"""
+        from app.auth.context import BUSINESS_OPERATOR
+        from app.auth.passwords import hash_password
+        from app.models import Department, User, UserDepartmentScope, UserRole
+
+        actor_id = uuid5(NAMESPACE_URL, "tradepilot-eval:file-operator-north")
+        login = "demo-eval-file-operator-north"
+        password = self.settings.demo_password
+        if password is None:
+            raise ValueError("隔离演示账号密码未配置")
+        async with session_factory() as session, session.begin():
+            department = await session.scalar(
+                select(Department).where(Department.code == "TP-DEMO-NORTH")
+            )
+            if department is None:
+                raise ValueError("隔离数据库缺少北区部门")
+            user = await session.get(User, actor_id)
+            if user is None:
+                user = User(
+                    id=actor_id,
+                    login=login,
+                    password_hash=hash_password(password.get_secret_value()),
+                    department_id=department.id,
+                    active=True,
+                )
+                session.add(user)
+            else:
+                user.login = login
+                user.password_hash = hash_password(password.get_secret_value())
+                user.department_id = department.id
+                user.active = True
+            if await session.get(UserRole, (actor_id, BUSINESS_OPERATOR)) is None:
+                session.add(UserRole(user_id=actor_id, role=BUSINESS_OPERATOR))
+            scope_key = (actor_id, department.id)
+            if await session.get(UserDepartmentScope, scope_key) is None:
+                session.add(
+                    UserDepartmentScope(user_id=actor_id, department_id=department.id)
+                )
+            department.active = True
+            await session.flush()
+        return {"login": login}
 
     async def _execute_task(
         self, case: dict, *, model_client_factory, model_execution_mode: str
