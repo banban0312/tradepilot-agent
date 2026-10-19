@@ -1313,6 +1313,9 @@
     "special-unknown-commit": {
       "extends": "normal-complete-sales"
     },
+    "special-concurrency-idempotency": {
+      "extends": "normal-complete-sales"
+    },
     "unauthorized-old-approval": {
       "extends": "normal-complete-sales"
     },

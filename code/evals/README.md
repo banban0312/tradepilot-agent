@@ -49,6 +49,7 @@
 - `duplicate-double-click` 由同一授权审批人并发提交两次相同版本、相同幂等键的批准请求，再由真实 Worker 处理唯一持久作业；核对只生成一笔订单和一次合同占额。
 - `duplicate-commit-stale-approval` 在排队审批被经办人编辑作废后，由真实 Worker 恢复新草稿，再直接重试旧持久批准的订单提交服务；断言以 `APPROVAL_INVALID` 拒绝且不产生订单或占额。
 - `duplicate-lost-response` 与 `special-unknown-commit` 在隔离服务中完成授权审批和真实订单提交，再重放同一持久审批命令；断言任务完成、重放返回同一订单，且不重复占额。由于订单提交目前是 Worker 内部事务，这两例验证的是提交结果持久化后的幂等恢复，不模拟外部 HTTP 响应丢失。
+- `special-concurrency-idempotency` 对同一已完成任务并发执行 8 次持久提交结果回放；断言 8 次均指向同一订单，订单和合同占额各只有一笔。
 - `normal-excel-row` 与 `ambiguity-excel-row` 使用固定 XLSX 夹具走真实附件上传和订单导入预览 API，断言正常组、缺项组和超额组状态及原始行号；预览不会伪装成 Agent 任务或模型调用，也不会创建订单、审批和额度占用。
 - `abnormal-damaged-pdf` 将固定损坏 PDF 上传至真实附件 API，断言上传校验返回 `FILE_UNREADABLE`，附件未落库且没有业务订单副作用。
 - `duplicate-same-key` 先由经办人创建草稿、授权审批人批准并由 Worker 提交，再在隔离事务中重放同一持久审批命令；核对提交函数返回原订单 ID，且数据库中订单和合同占额没有重复增加。当前服务的订单提交是 Worker 内部事务，不存在公开的订单提交 HTTP 端点；本项覆盖持久层幂等回放，不代表网络并发或响应丢失验证。

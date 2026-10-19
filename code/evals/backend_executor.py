@@ -151,6 +151,7 @@ class BackendCaseExecutor:
             "duplicate-lost-response",
             "special-unknown-commit",
         }
+        concurrent_commit_case = case.get("id") == "special-concurrency-idempotency"
         if (
             not duplicate_replay_case
             and not stale_commit_case
@@ -158,6 +159,7 @@ class BackendCaseExecutor:
             and not recovery_input_case
             and not duplicate_double_click_case
             and not lost_commit_response_case
+            and not concurrent_commit_case
             and actions != ["attempt_approve"]
             and (not actions or actions[0] != "create_task")
         ):
@@ -458,6 +460,7 @@ class BackendCaseExecutor:
             "duplicate-lost-response",
             "special-unknown-commit",
         }
+        concurrent_commit_case = case.get("id") == "special-concurrency-idempotency"
         from app.database import async_session_factory, engine
         from app.models import (
             AgentTask,
@@ -716,7 +719,7 @@ class BackendCaseExecutor:
                     worker=worker,
                     request_count=int(case["actions"][0].get("requests", 2)),
                 )
-            elif lost_commit_response_case:
+            elif lost_commit_response_case or concurrent_commit_case:
                 await self._run_approval_actions(
                     client=client,
                     task_id=task_id,
@@ -757,6 +760,17 @@ class BackendCaseExecutor:
                     task_id=task_uuid,
                     async_session_factory=async_session_factory,
                 )
+            elif concurrent_commit_case:
+                replay_results = await asyncio.gather(
+                    *(
+                        self._replay_approved_commit(
+                            task_id=task_uuid,
+                            async_session_factory=async_session_factory,
+                        )
+                        for _ in range(int(case["actions"][0].get("requests", 8)))
+                    )
+                )
+                same_order_id_on_replay = all(replay_results)
 
             task_response = await client.get(f"/api/v1/tasks/{task_id}")
             task_response.raise_for_status()
@@ -894,6 +908,9 @@ class BackendCaseExecutor:
                 "approval_actor_is_distinct": bool(approval_rows)
                 and all(row.actor_id != task_owner_id for row in approval_rows),
                 "same_order_id_on_replay": same_order_id_on_replay,
+                "concurrent_replay_count": len(replay_results)
+                if concurrent_commit_case
+                else None,
                 "quota_occupations": occupations,
                 "occupied_amount_delta": f"{occupied_after - occupied_before:.2f}",
             },
