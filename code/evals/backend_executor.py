@@ -476,6 +476,26 @@ class FixtureModelClient:
         del instructions, tools
         from app.agent.model_client import ModelResponse
 
+        error = self.fixture.get("error")
+        if error is not None:
+            from app.agent.model_client import ModelProviderError
+
+            if not isinstance(error, dict):
+                raise ValueError("离线模型错误夹具格式无效")
+            code = error.get("code")
+            retryable = error.get("retryable")
+            attempts = error.get("attempts")
+            if (
+                not isinstance(code, str)
+                or not code.startswith("MODEL_")
+                or not isinstance(retryable, bool)
+                or not isinstance(attempts, int)
+                or isinstance(attempts, bool)
+                or attempts < 1
+            ):
+                raise ValueError("离线模型错误夹具字段无效")
+            raise ModelProviderError(code, retryable=retryable, attempts=attempts)
+
         rounds = self.fixture.get("rounds", [])
         if self.round_index < len(rounds):
             output = tuple(

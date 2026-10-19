@@ -73,6 +73,33 @@ async def test_service_separates_pass_fail_skip_and_error() -> None:
     assert summarize_results(results)["exit_code"] == 1
 
 
+@pytest.mark.asyncio
+async def test_offline_fixture_replays_a_real_model_timeout_error() -> None:
+    from app.agent.model_client import ModelProviderError
+
+    from evals.backend_executor import FixtureModelClient
+
+    client = FixtureModelClient(
+        case_id="abnormal-model-timeout",
+        fixture={
+            "error": {
+                "code": "MODEL_TIMEOUT",
+                "retryable": True,
+                "attempts": 3,
+            }
+        },
+    )
+
+    with pytest.raises(ModelProviderError) as captured:
+        await client.create_response(
+            instructions="指令", input_items=[{"type": "message"}], tools=[]
+        )
+
+    assert captured.value.code == "MODEL_TIMEOUT"
+    assert captured.value.retryable is True
+    assert captured.value.attempts == 3
+
+
 def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() -> None:
     root = Path(__file__).resolve().parents[2] / "evals"
     manifest, cases = load_dataset(root, "v1")

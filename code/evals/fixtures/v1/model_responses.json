@@ -388,6 +388,26 @@
         ]
       ],
       "final_text": "数量缺失，需要等待用户补充后再继续。"
+    },
+    "abnormal-model-timeout": {
+      "error": {
+        "code": "MODEL_TIMEOUT",
+        "retryable": true,
+        "attempts": 3
+      }
+    },
+    "ambiguity-missing-spec": {
+      "rounds": [
+        [
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400"
+            }
+          }
+        ]
+      ],
+      "final_text": "有多个规格候选，需要用户明确直径规格。"
     }
   }
 }
