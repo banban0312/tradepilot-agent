@@ -247,6 +247,101 @@ class InputArtifact(TimestampMixin, Base):
     )
 
 
+class ImportBatch(TimestampMixin, Base):
+    """可恢复的 Excel 导入批次；相同幂等键只对应一组子任务。"""
+
+    __tablename__ = "import_batches"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('QUEUED', 'RUNNING', 'STOPPING', 'STOPPED', 'COMPLETED', 'PARTIAL')",
+            name="ck_import_batches_state",
+        ),
+        UniqueConstraint(
+            "owner_id", "idempotency_key", name="uq_import_batches_request"
+        ),
+        ForeignKeyConstraint(
+            ["owner_id"],
+            ["users.id"],
+            name="fk_import_batches_owner",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["department_id"],
+            ["departments.id"],
+            name="fk_import_batches_department",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["artifact_id"],
+            ["input_artifacts.id"],
+            name="fk_import_batches_artifact",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_import_batches_department_created", "department_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    department_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    artifact_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="QUEUED"
+    )
+    stop_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+
+class ImportBatchItem(Base):
+    """批次订单组及其源行；有效组关联独立 AgentTask/checkpoint。"""
+
+    __tablename__ = "import_batch_items"
+    __table_args__ = (
+        CheckConstraint(
+            "preview_status IN ('READY_FOR_REVIEW', 'OVER_QUOTA_REVIEW', 'NEEDS_CORRECTION')",
+            name="ck_import_batch_items_preview_status",
+        ),
+        CheckConstraint(
+            "stop_result IS NULL OR stop_result IN ('NOT_STARTED', 'ALREADY_STARTED')",
+            name="ck_import_batch_items_stop_result",
+        ),
+        UniqueConstraint(
+            "batch_id", "sheet_name", "group_id", name="uq_import_batch_items_group"
+        ),
+        UniqueConstraint("task_id", name="uq_import_batch_items_task"),
+        ForeignKeyConstraint(
+            ["batch_id"],
+            ["import_batches.id"],
+            name="fk_import_batch_items_batch",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["task_id"],
+            ["agent_tasks.id"],
+            name="fk_import_batch_items_task",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_import_batch_items_batch", "batch_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    batch_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    sheet_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_rows: Mapped[list[int]] = mapped_column(JSONB, nullable=False)
+    preview_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    issues: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    stop_result: Mapped[str | None] = mapped_column(String(24))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TaskArtifact(Base):
     """显式任务引用；只有当前身份可见的任务可以授权读取其附件。"""
 
