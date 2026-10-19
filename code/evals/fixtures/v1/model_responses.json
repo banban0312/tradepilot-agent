@@ -1316,6 +1316,9 @@
     "special-concurrency-idempotency": {
       "extends": "normal-complete-sales"
     },
+    "special-concurrency-quota": {
+      "extends": "normal-complete-sales"
+    },
     "unauthorized-old-approval": {
       "extends": "normal-complete-sales"
     },
@@ -1326,6 +1329,12 @@
       "extends": "ambiguity-missing-spec"
     },
     "duplicate-double-click": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-draft-replay": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-key-payload-conflict": {
       "extends": "normal-complete-sales"
     },
     "duplicate-commit-stale-approval": {

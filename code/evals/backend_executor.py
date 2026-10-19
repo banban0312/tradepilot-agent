@@ -27,6 +27,24 @@ if _BACKEND_ROOT.is_dir() and str(_BACKEND_ROOT) not in sys.path:
 from evals.service import CaseSkipped
 
 
+class QuotaRaceSecondTaskError(RuntimeError):
+    """第二笔任务未能进入待审批状态。"""
+
+
+class QuotaRaceWorkerClaimError(RuntimeError):
+    """两个并发 Worker 未能分别领取额度竞争作业。"""
+
+
+class QuotaRaceOutcomeError(RuntimeError):
+    """额度竞争结果不符合一笔成功、一笔阻断的不变量。"""
+
+    def __init__(self, state_summary: dict[str, dict[str, str | None]]) -> None:
+        self.evaluation_stage = json.dumps(
+            state_summary, ensure_ascii=False, sort_keys=True
+        )
+        super().__init__("额度并发结果必须恰有一笔完成、一笔超额阻断")
+
+
 class BackendCaseExecutor:
     """每例走正式任务 API 与持久 Worker，仅在线模式调用已配置模型。"""
 
@@ -147,19 +165,27 @@ class BackendCaseExecutor:
         duplicate_double_click_case = case.get(
             "id"
         ) == "duplicate-double-click" and actions == ["concurrent_commit"]
+        duplicate_draft_replay_case = case.get("id") == "duplicate-draft-replay"
         lost_commit_response_case = case.get("id") in {
             "duplicate-lost-response",
             "special-unknown-commit",
         }
         concurrent_commit_case = case.get("id") == "special-concurrency-idempotency"
+        commit_payload_conflict_case = (
+            case.get("id") == "duplicate-key-payload-conflict"
+        )
+        quota_competition_case = case.get("id") == "special-concurrency-quota"
         if (
             not duplicate_replay_case
             and not stale_commit_case
             and not recovery_approval_case
             and not recovery_input_case
             and not duplicate_double_click_case
+            and not duplicate_draft_replay_case
             and not lost_commit_response_case
             and not concurrent_commit_case
+            and not commit_payload_conflict_case
+            and not quota_competition_case
             and actions != ["attempt_approve"]
             and (not actions or actions[0] != "create_task")
         ):
@@ -211,6 +237,15 @@ class BackendCaseExecutor:
                     selected_fixture = deepcopy(
                         self.model_fixtures["cases"]["normal-complete-sales"]
                     )
+                elif quota_competition_case:
+                    selected_fixture = deepcopy(fixture)
+                    contract_number = self.fixtures["contracts"][
+                        case["contract_fixture"]
+                    ]["number"]
+                    for round_calls in selected_fixture.get("rounds", []):
+                        for call in round_calls:
+                            if call.get("name") == "get_contract":
+                                call["arguments"]["contract_number"] = contract_number
                 fixture_runs += 1
                 return FixtureModelClient(case_id=case["id"], fixture=selected_fixture)
 
@@ -456,11 +491,16 @@ class BackendCaseExecutor:
         duplicate_double_click_case = case.get(
             "id"
         ) == "duplicate-double-click" and actions == ["concurrent_commit"]
+        duplicate_draft_replay_case = case.get("id") == "duplicate-draft-replay"
         lost_commit_response_case = case.get("id") in {
             "duplicate-lost-response",
             "special-unknown-commit",
         }
         concurrent_commit_case = case.get("id") == "special-concurrency-idempotency"
+        commit_payload_conflict_case = (
+            case.get("id") == "duplicate-key-payload-conflict"
+        )
+        quota_competition_case = case.get("id") == "special-concurrency-quota"
         from app.database import async_session_factory, engine
         from app.models import (
             AgentTask,
@@ -509,6 +549,8 @@ class BackendCaseExecutor:
         action_error_code = None
         action_status_code = None
         same_order_id_on_replay = None
+        duplicate_draft_replay_matches = None
+        competition_task_ids = []
         worker_restarted = False
         async with httpx.AsyncClient(
             base_url=self.api_url,
@@ -608,6 +650,7 @@ class BackendCaseExecutor:
             from uuid import UUID
 
             task_uuid = UUID(task_id)
+            competition_task_ids = [task_uuid]
             async with async_session_factory() as session, session.begin():
                 command = await session.get(TaskCommand, UUID(command_id))
                 if command is None or command.task_id != task_uuid:
@@ -677,7 +720,34 @@ class BackendCaseExecutor:
                 worker_id=f"eval-{uuid4().hex[:20]}",
                 poll_seconds=0.01,
             )
-            if not await worker.run_once():
+            if duplicate_draft_replay_case:
+                from app.agent import function_calling
+
+                original_client = function_calling.MCPToolClient
+                replay_state = {"matches": False, "count": 0}
+
+                class ReplaySameMCPRequest(original_client):
+                    async def call_tool(self, name, arguments, *, context_token):
+                        result = await super().call_tool(
+                            name, arguments, context_token=context_token
+                        )
+                        if name == "save_order_draft" and replay_state["count"] == 0:
+                            replay = await super().call_tool(
+                                name, arguments, context_token=context_token
+                            )
+                            replay_state["matches"] = replay == result
+                            replay_state["count"] += 1
+                        return result
+
+                function_calling.MCPToolClient = ReplaySameMCPRequest
+                try:
+                    worker_ran = await worker.run_once()
+                finally:
+                    function_calling.MCPToolClient = original_client
+                duplicate_draft_replay_matches = replay_state["matches"]
+            else:
+                worker_ran = await worker.run_once()
+            if not worker_ran:
                 raise RuntimeError("隔离评测 Worker 未领取新建任务")
 
             if stale_approval_case:
@@ -719,7 +789,11 @@ class BackendCaseExecutor:
                     worker=worker,
                     request_count=int(case["actions"][0].get("requests", 2)),
                 )
-            elif lost_commit_response_case or concurrent_commit_case:
+            elif (
+                lost_commit_response_case
+                or concurrent_commit_case
+                or commit_payload_conflict_case
+            ):
                 await self._run_approval_actions(
                     client=client,
                     task_id=task_id,
@@ -728,7 +802,23 @@ class BackendCaseExecutor:
                     else self.fixtures["actors"]["approver_north"],
                     worker=worker,
                 )
-            elif len(actions) > 1:
+            elif quota_competition_case:
+                (
+                    competition_task_ids,
+                    blocked_task_id,
+                    action_error_code,
+                ) = await self._run_concurrent_quota_competition(
+                    client=client,
+                    worker=worker,
+                    first_task_id=task_id,
+                    order_type=order_type,
+                    input_text=input_text,
+                    fixed_time=case["fixed_time"],
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"],
+                )
+                task_id = blocked_task_id
+                task_uuid = UUID(blocked_task_id)
+            elif len(actions) > 1 and not duplicate_draft_replay_case:
                 await self._run_approval_actions(
                     client=client,
                     task_id=task_id,
@@ -771,6 +861,11 @@ class BackendCaseExecutor:
                     )
                 )
                 same_order_id_on_replay = all(replay_results)
+            elif commit_payload_conflict_case:
+                action_error_code = await self._replay_conflicting_approved_commit(
+                    task_id=task_uuid,
+                    async_session_factory=async_session_factory,
+                )
 
             task_response = await client.get(f"/api/v1/tasks/{task_id}")
             task_response.raise_for_status()
@@ -786,7 +881,7 @@ class BackendCaseExecutor:
                 await session.scalar(
                     select(func.count())
                     .select_from(Order)
-                    .where(Order.task_id == task_uuid)
+                    .where(Order.task_id.in_(competition_task_ids))
                 )
                 or 0
             )
@@ -794,7 +889,7 @@ class BackendCaseExecutor:
                 await session.scalar(
                     select(func.count())
                     .select_from(TaskApproval)
-                    .where(TaskApproval.task_id == task_uuid)
+                    .where(TaskApproval.task_id.in_(competition_task_ids))
                 )
                 or 0
             )
@@ -802,7 +897,7 @@ class BackendCaseExecutor:
                 await session.scalar(
                     select(func.count())
                     .select_from(QuotaOccupation)
-                    .where(QuotaOccupation.task_id == task_uuid)
+                    .where(QuotaOccupation.task_id.in_(competition_task_ids))
                 )
                 or 0
             )
@@ -812,7 +907,9 @@ class BackendCaseExecutor:
             approval_rows = list(
                 (
                     await session.scalars(
-                        select(TaskApproval).where(TaskApproval.task_id == task_uuid)
+                        select(TaskApproval).where(
+                            TaskApproval.task_id.in_(competition_task_ids)
+                        )
                     )
                 ).all()
             )
@@ -872,6 +969,8 @@ class BackendCaseExecutor:
             )
             if same_order_id_on_replay is not None:
                 draft_fields["same_order_id_on_replay"] = same_order_id_on_replay
+            if duplicate_draft_replay_case:
+                draft_fields["draft_count"] = draft.current_version if draft else 0
 
         last_error = task_data.get("last_error")
         return {
@@ -911,6 +1010,7 @@ class BackendCaseExecutor:
                 "concurrent_replay_count": len(replay_results)
                 if concurrent_commit_case
                 else None,
+                "duplicate_draft_replay_matches": duplicate_draft_replay_matches,
                 "quota_occupations": occupations,
                 "occupied_amount_delta": f"{occupied_after - occupied_before:.2f}",
             },
@@ -1055,7 +1155,9 @@ class BackendCaseExecutor:
         await session.commit()
         return contract
 
-    async def _run_approval_actions(self, *, client, task_id, approver, worker) -> None:
+    async def _run_approval_actions(
+        self, *, client, task_id, approver, worker, run_worker: bool = True
+    ) -> None:
         """由独立授权用户正式审批，再恢复真实 Worker。"""
         task_response = await client.get(f"/api/v1/tasks/{task_id}")
         task_response.raise_for_status()
@@ -1093,8 +1195,119 @@ class BackendCaseExecutor:
             },
         )
         review_response.raise_for_status()
-        if not await worker.run_once():
+        if run_worker and not await worker.run_once():
             raise RuntimeError("人工审批后隔离 Worker 未领取恢复作业")
+
+    async def _run_concurrent_quota_competition(
+        self,
+        *,
+        client,
+        worker,
+        first_task_id: str,
+        order_type: str,
+        input_text: str,
+        fixed_time: str,
+        approver: dict,
+    ) -> tuple[list[UUID], str, str]:
+        """先准备两笔合同额度相同的待批订单，再并发争抢最终提交额度。"""
+        from app.database import async_session_factory
+        from app.models import TaskCommand
+
+        create_response = await client.post(
+            "/api/v1/tasks",
+            headers={"Idempotency-Key": f"eval-quota-race-{uuid4().hex}"},
+            json={"order_type": order_type, "input": {"text": input_text}},
+        )
+        create_response.raise_for_status()
+        second_task_id = create_response.json()["data"]["task_id"]
+        second_command_id = UUID(create_response.json()["data"]["command_id"])
+        async with async_session_factory() as session, session.begin():
+            command = await session.get(TaskCommand, second_command_id)
+            if command is None:
+                raise RuntimeError("第二笔并发订单缺少 START 命令")
+            command.payload = {
+                **command.payload,
+                "input_at": datetime.fromisoformat(fixed_time).isoformat(),
+            }
+        if not await worker.run_once():
+            raise QuotaRaceSecondTaskError("隔离 Worker 未处理第二笔并发订单")
+        task_ids = [first_task_id, second_task_id]
+        for task_id in task_ids:
+            task_response = await client.get(f"/api/v1/tasks/{task_id}")
+            task_response.raise_for_status()
+            task = task_response.json()["data"]
+            if task.get("state") != "WAITING_APPROVAL":
+                raise QuotaRaceSecondTaskError("额度并发案例的两笔草稿都应先等待审批")
+            await self._run_approval_actions(
+                client=client,
+                task_id=task_id,
+                approver=approver,
+                worker=worker,
+                run_worker=False,
+            )
+
+        # 两个独立 Worker 并发领取不同任务，同时竞争同一合同的额度账。
+        from app.worker.queue import PersistentTaskWorker
+
+        competing_worker = PersistentTaskWorker(
+            engine=worker.engine,
+            session_factory=worker.session_factory,
+            handlers=worker.handlers,
+            worker_id=f"eval-quota-race-{uuid4().hex[:16]}",
+            poll_seconds=0.01,
+        )
+        processed = await asyncio.gather(worker.run_once(), competing_worker.run_once())
+        if processed != [True, True]:
+            raise QuotaRaceWorkerClaimError("两个并发 Worker 未分别领取额度竞争作业")
+        states = {}
+        for task_id in task_ids:
+            response = await client.get(f"/api/v1/tasks/{task_id}")
+            response.raise_for_status()
+            states[task_id] = response.json()["data"]
+        blocked = [
+            task_id
+            for task_id, task in states.items()
+            if task.get("state") == "BLOCKED_RULE"
+        ]
+        completed = [
+            task_id
+            for task_id, task in states.items()
+            if task.get("state") == "COMPLETED"
+        ]
+        if len(blocked) != 1 or len(completed) != 1:
+            raise QuotaRaceOutcomeError(
+                {
+                    task_id: {
+                        "state": str(task.get("state")),
+                        "error_code": (task.get("last_error") or {}).get("code"),
+                    }
+                    for task_id, task in states.items()
+                }
+            )
+        async with async_session_factory() as session:
+            blocked_command = await session.scalar(
+                select(TaskCommand)
+                .where(
+                    TaskCommand.task_id == UUID(blocked[0]),
+                    TaskCommand.kind == "REVIEW",
+                )
+                .order_by(TaskCommand.created_at.desc(), TaskCommand.id.desc())
+            )
+            result_ref = blocked_command.result_ref if blocked_command else None
+            block_code = (
+                result_ref.get("code") if isinstance(result_ref, dict) else None
+            )
+        if block_code != "CONTRACT_AMOUNT_EXCEEDED":
+            raise QuotaRaceOutcomeError(
+                {
+                    task_id: {
+                        "state": str(task.get("state")),
+                        "error_code": (task.get("last_error") or {}).get("code"),
+                    }
+                    for task_id, task in states.items()
+                }
+            )
+        return [UUID(value) for value in task_ids], blocked[0], str(block_code)
 
     async def _run_stale_approval_actions(
         self,
@@ -1416,6 +1629,52 @@ class BackendCaseExecutor:
                 config=self.settings,
             )
             return result.replayed and result.order_id == original_order_id
+
+    async def _replay_conflicting_approved_commit(
+        self, *, task_id, async_session_factory
+    ) -> str:
+        """用隔离 savepoint 改动审批绑定，再确认订单提交拒绝幂等冲突。"""
+        from app.models import TaskApproval, TaskCommand
+        from app.orders.commit import OrderCommitRejected, commit_approved_order
+
+        class RollbackConflictProbe(Exception):
+            pass
+
+        code = None
+        async with async_session_factory() as session, session.begin():
+            approval = await session.scalar(
+                select(TaskApproval)
+                .where(
+                    TaskApproval.task_id == task_id,
+                    TaskApproval.decision == "APPROVE",
+                )
+                .order_by(TaskApproval.created_at.desc(), TaskApproval.id.desc())
+            )
+            if approval is None:
+                raise RuntimeError("幂等冲突案例缺少已批准快照")
+            command = await session.get(TaskCommand, approval.command_id)
+            if command is None:
+                raise RuntimeError("幂等冲突案例缺少持久审批命令")
+            try:
+                async with session.begin_nested():
+                    command.payload = {**command.payload, "content_hash": "冲突内容"}
+                    await session.flush()
+                    try:
+                        await commit_approved_order(
+                            session,
+                            task_id=task_id,
+                            command_id=approval.command_id,
+                            approval_id=approval.id,
+                            config=self.settings,
+                        )
+                    except OrderCommitRejected as exc:
+                        code = str(exc.args[1]) if len(exc.args) > 1 else "UNKNOWN"
+                        raise RollbackConflictProbe() from exc
+            except RollbackConflictProbe:
+                pass
+        if code != "ORDER_IDEMPOTENCY_CONFLICT":
+            raise RuntimeError(f"预期订单幂等冲突，实际错误码：{code}")
+        return code
 
     async def _attempt_review_as(self, *, client, task_id, approver) -> tuple[str, int]:
         """记录越权审批 API 的真实拒绝；不会伪造任务终态或审批记录。"""

@@ -154,6 +154,10 @@ class EvaluationService:
                 )
                 continue
             except Exception as exc:  # noqa: BLE001 - each case must leave a report row.
+                actual = {"exception_type": type(exc).__name__}
+                diagnostic = getattr(exc, "evaluation_stage", None)
+                if isinstance(diagnostic, str) and len(diagnostic) <= 2000:
+                    actual["diagnostic"] = diagnostic
                 results.append(
                     CaseResult(
                         case_id=case["id"],
@@ -162,7 +166,7 @@ class EvaluationService:
                         expected=expected,
                         input=case.get("input", {}),
                         error_code=str(getattr(exc, "code", "EVAL_EXECUTION_ERROR")),
-                        actual={"exception_type": type(exc).__name__},
+                        actual=actual,
                     )
                 )
                 continue

@@ -74,6 +74,21 @@ async def test_service_separates_pass_fail_skip_and_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_service_keeps_bounded_safe_diagnostic_for_failed_case() -> None:
+    error = RuntimeError("竞态状态不符")
+    error.evaluation_stage = '{"state":"BLOCKED_RULE"}'
+    results = await EvaluationService(
+        Executor({"diagnostic": error}), mode="offline"
+    ).run([_case("diagnostic")])
+
+    assert results[0].status == "ERROR"
+    assert results[0].actual == {
+        "exception_type": "RuntimeError",
+        "diagnostic": '{"state":"BLOCKED_RULE"}',
+    }
+
+
+@pytest.mark.asyncio
 async def test_offline_fixture_replays_a_real_model_timeout_error() -> None:
     from app.agent.model_client import ModelProviderError
 
@@ -155,6 +170,13 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
         case for case in cases if case["id"] == "duplicate-double-click"
     )
     assert duplicate_click_case["actions"][0]["requests"] == 2
+    duplicate_draft_case = next(
+        case for case in cases if case["id"] == "duplicate-draft-replay"
+    )
+    assert [action["kind"] for action in duplicate_draft_case["actions"]] == [
+        "call_save_draft",
+        "replay_same_tool_request",
+    ]
     stale_commit_case = next(
         case for case in cases if case["id"] == "duplicate-commit-stale-approval"
     )
@@ -169,7 +191,10 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
     assert "special-recovery-waiting-approval" in response_fixtures["cases"]
     assert "special-recovery-waiting-input" in response_fixtures["cases"]
     assert "duplicate-double-click" in response_fixtures["cases"]
+    assert "duplicate-draft-replay" in response_fixtures["cases"]
+    assert "duplicate-key-payload-conflict" in response_fixtures["cases"]
     assert "duplicate-commit-stale-approval" in response_fixtures["cases"]
+    assert "special-concurrency-quota" in response_fixtures["cases"]
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")
