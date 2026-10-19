@@ -6,11 +6,11 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 from sqlalchemy import func, select
@@ -145,6 +145,8 @@ class BackendCaseExecutor:
             AgentTask,
             Contract,
             ContractBalance,
+            ContractLine,
+            ContractLineBalance,
             Draft,
             DraftItem,
             FieldEvidence,
@@ -194,7 +196,16 @@ class BackendCaseExecutor:
                     select(Contract).where(Contract.number == contract_number)
                 )
                 if contract is None:
-                    raise ValueError(f"隔离数据库缺少合同夹具 {contract_number}")
+                    contract = await self._seed_contract_fixture(
+                        session,
+                        case["contract_fixture"],
+                        contract_fixture,
+                        Contract=Contract,
+                        ContractLine=ContractLine,
+                        ContractBalance=ContractBalance,
+                        ContractLineBalance=ContractLineBalance,
+                        Material=Material,
+                    )
                 balance = await session.get(ContractBalance, contract.id)
                 occupied_before = (
                     balance.occupied_amount if balance is not None else Decimal("0.00")
@@ -376,8 +387,130 @@ class BackendCaseExecutor:
             "trace_id": str(trace_rows[0].trace_id) if trace_rows else None,
         }
 
+    async def _seed_contract_fixture(
+        self,
+        session,
+        fixture_id: str,
+        fixture: dict,
+        *,
+        Contract,
+        ContractLine,
+        ContractBalance,
+        ContractLineBalance,
+        Material,
+    ):
+        """只在隔离评测库补齐缺失的合同样本及额度账。"""
+        from app.models import Department
+
+        base_contract = next(
+            (
+                item
+                for item in self.fixtures["contracts"].values()
+                if item["department"] == fixture["department"]
+                and item["direction"] == fixture["direction"]
+                and item["status"] == "active"
+            ),
+            None,
+        )
+        if base_contract is None:
+            raise ValueError("合同夹具没有同部门、同方向的基础合同")
+        base_row = await session.scalar(
+            select(Contract).where(Contract.number == base_contract["number"])
+        )
+        if base_row is None:
+            raise ValueError("隔离数据库缺少合同夹具的基础合同")
+
+        department_code = f"TP-DEMO-{fixture['department'].upper()}"
+        department = await session.scalar(
+            select(Department).where(Department.code == department_code)
+        )
+        if department is None:
+            raise ValueError("隔离数据库缺少合同夹具所属部门")
+        line_fixture = fixture.get("line")
+        if not isinstance(line_fixture, dict):
+            raise TypeError("合同夹具缺少合同明细")
+        material_fixture = next(
+            (
+                item
+                for item in self.fixtures.get("materials", [])
+                if item.get("id") == line_fixture.get("material_id")
+            ),
+            None,
+        )
+        if material_fixture is None:
+            raise ValueError("合同夹具引用了不存在的物料")
+        material = await session.scalar(
+            select(Material).where(Material.code == material_fixture["source_code"])
+        )
+        if material is None:
+            raise ValueError("隔离数据库缺少合同夹具引用的物料")
+
+        contract_id = uuid5(NAMESPACE_URL, f"tradepilot-eval:{fixture_id}:contract")
+        contract = Contract(
+            id=contract_id,
+            number=fixture["number"],
+            department_id=department.id,
+            type=fixture["direction"].upper(),
+            customer_id=base_row.customer_id,
+            project_id=base_row.project_id,
+            currency="CNY",
+            total_amount=Decimal(
+                str(
+                    fixture.get("total_amount")
+                    or fixture.get("remaining_amount")
+                    or base_row.total_amount
+                )
+            ),
+            status=fixture["status"].upper(),
+            valid_from=date.fromisoformat(
+                fixture.get("valid_from", base_row.valid_from.isoformat())
+            ),
+            valid_to=date.fromisoformat(
+                fixture.get("valid_to", base_row.valid_to.isoformat())
+            ),
+            version=1,
+        )
+        session.add(contract)
+        await session.flush()
+        line_id = uuid5(NAMESPACE_URL, f"tradepilot-eval:{fixture_id}:line:0")
+        line = ContractLine(
+            id=line_id,
+            contract_id=contract.id,
+            material_id=material.id,
+            unit=line_fixture.get("unit") or material.unit,
+            unit_price=(
+                Decimal(str(line_fixture["price"]))
+                if line_fixture.get("price") is not None
+                else None
+            ),
+            max_quantity=(
+                Decimal(str(line_fixture["max_quantity"]))
+                if line_fixture.get("max_quantity") is not None
+                else None
+            ),
+        )
+        session.add_all(
+            [
+                line,
+                ContractBalance(
+                    contract_id=contract.id,
+                    occupied_amount=Decimal("0.00"),
+                    occupied_order_count=0,
+                    version=0,
+                ),
+                ContractLineBalance(
+                    contract_line_id=line.id,
+                    occupied_quantity=Decimal("0.000000"),
+                ),
+            ]
+        )
+        await session.flush()
+        # 先提交隔离主数据，确保后续 API 与 MCP 请求看到同一组可复用夹具。
+        await session.commit()
+        return contract
+
     async def _run_approval_actions(self, *, client, task_id, approver, worker) -> None:
-        """Approve through an independent authenticated user, then resume the real worker."""
+        """由独立授权用户正式审批，再恢复真实 Worker。"""
         task_response = await client.get(f"/api/v1/tasks/{task_id}")
         task_response.raise_for_status()
         task = task_response.json()["data"]

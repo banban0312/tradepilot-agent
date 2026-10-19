@@ -88,7 +88,7 @@ class DatabaseWorkflowServices:
         )
 
     def _business_date(self, state: WorkflowState) -> date:
-        """Use the task's fixed input timestamp for deterministic business rules."""
+        """使用任务输入时间按业务时区计算日期，保证评测规则可复现。"""
         input_at = datetime.fromisoformat(state["input_at"])
         return input_at.astimezone(ZoneInfo(self.config.business_timezone)).date()
 
