@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
@@ -12,10 +14,12 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import BUSINESS_OPERATOR, AuthContext, require_business_access
+from app.drafts.types import CandidateOrder, candidate_amounts
 from app.models import (
     AgentTask,
     AuditEvent,
     Contract,
+    ContractBalance,
     ImportBatch,
     ImportBatchItem,
     InputArtifact,
@@ -33,6 +37,10 @@ from app.tasks.service import IdempotencyConflict, create_task, enqueue_command
 
 class BatchIdempotencyConflict(ValueError):
     """相同批次键被用于另一附件或请求内容。"""
+
+
+class BatchItemVersionConflict(ValueError):
+    """批次分组已被另一编辑请求更新。"""
 
 
 def _digest_request(artifact: InputArtifact) -> str:
@@ -179,6 +187,7 @@ async def create_batch(
             source_rows=source_rows,
             preview_status=preview_status,
             issues=group.get("issues", []),
+            candidate_json=group.get("candidate", {}),
         )
         session.add(item)
         if preview_status != "READY_FOR_REVIEW":
@@ -261,6 +270,374 @@ async def create_batch(
     )
     await session.flush()
     return batch, False
+
+
+def _candidate_field(candidate: CandidateOrder, field: str) -> object:
+    match = re.fullmatch(
+        r"items\[(\d+)]\.(raw_name|specification|quantity|unit|unit_price)", field
+    )
+    if match is not None:
+        index = int(match.group(1))
+        return (
+            getattr(candidate.items[index], match.group(2))
+            if index < len(candidate.items)
+            else None
+        )
+    return getattr(candidate, field, None)
+
+
+async def correct_batch_item(
+    session: AsyncSession,
+    *,
+    batch_id: UUID,
+    sheet_name: str,
+    group_id: str,
+    expected_version: int,
+    candidate_data: dict[str, Any],
+    context: AuthContext,
+) -> dict[str, object]:
+    """锁定一个异常组、保存编辑版本并重新检查后再创建独立子任务。"""
+    if BUSINESS_OPERATOR not in context.roles:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ACCESS_DENIED", "message": "当前账号无权修改批次"},
+        )
+    batch = await session.scalar(
+        select(ImportBatch).where(ImportBatch.id == batch_id).with_for_update()
+    )
+    if batch is None or batch.owner_id != context.user_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "RESOURCE_NOT_FOUND", "message": "批次不存在"},
+        )
+    require_business_access(context, batch.department_id)
+    if batch.stop_requested:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "BATCH_STOPPED", "message": "批次已停止，不能修改订单组"},
+        )
+    item = await session.scalar(
+        select(ImportBatchItem)
+        .where(
+            ImportBatchItem.batch_id == batch.id,
+            ImportBatchItem.sheet_name == sheet_name,
+            ImportBatchItem.group_id == group_id,
+        )
+        .with_for_update()
+    )
+    if item is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "RESOURCE_NOT_FOUND", "message": "订单组不存在"},
+        )
+    if item.task_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TASK_ALREADY_CREATED",
+                "message": "该订单组已建立任务，请在任务草稿中修改",
+            },
+        )
+    if item.edit_version != expected_version:
+        raise BatchItemVersionConflict("订单组版本已变化，请刷新后重试")
+    try:
+        original = CandidateOrder.model_validate(item.candidate_json)
+        candidate = CandidateOrder.model_validate(candidate_data)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INPUT_INVALID", "message": "订单组修改内容无效"},
+        ) from exc
+    immutable = (
+        "order_type",
+        "contract_id",
+        "customer_id",
+        "project_id",
+        "currency",
+        "business_fields",
+        "evidence",
+    )
+    if any(getattr(original, name) != getattr(candidate, name) for name in immutable):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PATCH_FIELD_FORBIDDEN",
+                "message": "只能修改订单日期、地址、联系人和 Excel 物料行字段",
+            },
+        )
+    if len(original.items) != len(candidate.items) or any(
+        left.material_id != right.material_id
+        for left, right in zip(original.items, candidate.items, strict=True)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PATCH_FIELD_FORBIDDEN",
+                "message": "不能修改物料关联或增删 Excel 明细行",
+            },
+        )
+
+    issues = []
+    resolvable = {
+        "MISSING_FIELD",
+        "INVALID_NUMBER",
+        "INVALID_QUANTITY",
+        "INVALID_UNIT_PRICE",
+        "INVALID_CELL_VALUE",
+        "AMOUNT_OUT_OF_RANGE",
+    }
+    for issue in item.issues:
+        # 交期可在表格中修改；日期范围错误必须按本次候选数据重新计算。
+        if issue.get("code") == "CONTRACT_DATE_CONFLICT":
+            continue
+        field = str(issue.get("field", ""))
+        value = _candidate_field(candidate, field)
+        resolved = value is not None and value != ""
+        if field.endswith((".quantity", ".unit_price")):
+            try:
+                resolved = value is not None and value > 0  # type: ignore[operator]
+            except TypeError:
+                resolved = False
+        if issue.get("code") in resolvable and resolved:
+            continue
+        issues.append(issue)
+
+    def add_issue(code: str, field: str, message: str) -> None:
+        if not any(
+            issue.get("code") == code and issue.get("field") == field
+            for issue in issues
+        ):
+            row = item.source_rows[0] if item.source_rows else None
+            issues.append(
+                {
+                    "code": code,
+                    "field": field,
+                    "message": message,
+                    "locator": {
+                        "sheet": sheet_name,
+                        "row": row,
+                        "column": None,
+                        "cell": None,
+                    },
+                }
+            )
+
+    for field, label in (
+        ("order_type", "订单类型"),
+        ("contract_id", "合同"),
+        ("customer_id", "客户"),
+        ("project_id", "项目"),
+        ("delivery_date", "交期"),
+        ("address", "收货地址"),
+        ("contact", "联系人"),
+    ):
+        value = _candidate_field(candidate, field)
+        if value is None or value == "":
+            add_issue("MISSING_FIELD", field, f"缺少{label}")
+    if not candidate.items:
+        add_issue("MISSING_ITEMS", "items", "至少需要一条订单明细")
+    for index, line in enumerate(candidate.items):
+        for field, label in (
+            ("raw_name", "物料名称"),
+            ("specification", "规格"),
+            ("unit", "单位"),
+        ):
+            if not getattr(line, field):
+                add_issue(
+                    "MISSING_FIELD",
+                    f"items[{index}].{field}",
+                    f"缺少第 {index + 1} 行{label}",
+                )
+        if line.quantity is None or line.quantity <= 0:
+            add_issue("INVALID_QUANTITY", f"items[{index}].quantity", "数量必须大于 0")
+        if line.unit_price is None or line.unit_price <= 0:
+            add_issue(
+                "INVALID_UNIT_PRICE", f"items[{index}].unit_price", "含税单价必须大于 0"
+            )
+
+    contract = (
+        await session.scalar(
+            select(Contract).where(
+                Contract.id == candidate.contract_id,
+                Contract.department_id == batch.department_id,
+            )
+        )
+        if candidate.contract_id
+        else None
+    )
+    project = (
+        await session.get(Project, candidate.project_id)
+        if candidate.project_id
+        else None
+    )
+    if contract is None:
+        add_issue(
+            "CONTRACT_NOT_FOUND",
+            "contract_id",
+            "合同无法匹配，请修正 Excel 合同编号后重新上传",
+        )
+    else:
+        if contract.status != "ACTIVE":
+            add_issue("CONTRACT_INACTIVE", "contract_id", "合同已停用，不能用于新订单")
+        if candidate.order_type != contract.type:
+            add_issue(
+                "CONTRACT_TYPE_CONFLICT", "order_type", "订单类型与合同类型不一致"
+            )
+        if (
+            candidate.delivery_date is not None
+            and not contract.valid_from <= candidate.delivery_date <= contract.valid_to
+        ):
+            add_issue(
+                "CONTRACT_DATE_CONFLICT", "delivery_date", "交期不在合同有效日期范围内"
+            )
+        if (
+            project is None
+            or project.department_id != contract.department_id
+            or project.id != contract.project_id
+        ):
+            add_issue(
+                "PROJECT_CONTRACT_CONFLICT", "project_id", "项目与合同关联项目不一致"
+            )
+        if candidate.customer_id != contract.customer_id:
+            add_issue(
+                "CONTRACT_CUSTOMER_CONFLICT", "customer_id", "客户与合同签约客户不一致"
+            )
+    try:
+        _, total = candidate_amounts(candidate)
+    except ValueError:
+        total = None
+        add_issue("AMOUNT_OUT_OF_RANGE", "items", "订单金额超出系统可处理范围")
+    over_quota = False
+    if contract is not None and total is not None:
+        balance = await session.get(ContractBalance, contract.id)
+        if balance is None:
+            add_issue(
+                "QUOTA_UNAVAILABLE",
+                "contract_id",
+                "合同额度数据暂不可用，当前不能创建子任务",
+            )
+        else:
+            sibling_items = await session.scalars(
+                select(ImportBatchItem).where(
+                    ImportBatchItem.batch_id == batch.id,
+                    ImportBatchItem.id != item.id,
+                    ImportBatchItem.task_id.is_(None),
+                    ImportBatchItem.preview_status.in_(
+                        ("READY_FOR_REVIEW", "OVER_QUOTA_REVIEW")
+                    ),
+                )
+            )
+            pending_amount = Decimal(0)
+            for sibling in sibling_items:
+                try:
+                    sibling_candidate = CandidateOrder.model_validate(
+                        sibling.candidate_json
+                    )
+                    if (
+                        sibling_candidate.contract_id == contract.id
+                        and not sibling.issues
+                    ):
+                        _, sibling_total = candidate_amounts(sibling_candidate)
+                        pending_amount += sibling_total
+                except (TypeError, ValueError):
+                    continue
+            remaining = max(
+                Decimal(0),
+                contract.total_amount - balance.occupied_amount - pending_amount,
+            )
+            over_quota = total > remaining
+
+    item.candidate_json = candidate.model_dump(mode="json")
+    item.issues = issues
+    item.preview_status = (
+        "NEEDS_CORRECTION"
+        if issues
+        else "OVER_QUOTA_REVIEW"
+        if over_quota
+        else "READY_FOR_REVIEW"
+    )
+    item.edit_version += 1
+    if item.preview_status == "READY_FOR_REVIEW":
+        artifact = await session.get(InputArtifact, batch.artifact_id)
+        if (
+            artifact is None
+            or artifact.owner_id != batch.owner_id
+            or contract is None
+            or project is None
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "RESOURCE_NOT_FOUND",
+                    "message": "来源附件或主数据不存在",
+                },
+            )
+        stable_group = hashlib.sha256(f"{sheet_name}\0{group_id}".encode()).hexdigest()
+        task_session = TaskSession(
+            id=uuid4(), owner_id=batch.owner_id, title=f"Excel 批次 {str(batch.id)[:8]}"
+        )
+        session.add(task_session)
+        await session.flush()
+        task = await create_task(
+            session,
+            owner_id=batch.owner_id,
+            department_id=batch.department_id,
+            task_type=candidate.order_type or contract.type,
+            title=f"{group_id[:80]}（批量导入）",
+            task_id=uuid5(batch.id, f"tradepilot/import-child/{stable_group}"),
+            session_id=task_session.id,
+        )
+        item.task_id = task.id
+        session.add(TaskArtifact(task_id=task.id, artifact_id=artifact.id))
+        group_data = {
+            "group_id": group_id,
+            "sheet": sheet_name,
+            "rows": item.source_rows,
+            "candidate": candidate.model_dump(mode="json"),
+        }
+        command = await enqueue_command(
+            session,
+            task_id=task.id,
+            actor_id=context.user_id,
+            kind="START",
+            payload={
+                "text": _group_input(group_data, contract.number, project.name),
+                "input_type": "EXCEL_GROUP",
+                "order_type": candidate.order_type,
+                "import_batch_id": str(batch.id),
+                "source_rows": item.source_rows,
+            },
+            request_id=f"batch:{batch.id.hex}:{stable_group[:24]}",
+        )
+        if command.replayed:
+            raise BatchIdempotencyConflict("订单组已存在启动命令")
+        await append_task_event(
+            session,
+            task_id=task.id,
+            event_type="task.status_changed",
+            payload={"state": "QUEUED", "projection_version": task.projection_version},
+        )
+    session.add(
+        AuditEvent(
+            id=uuid4(),
+            task_id=item.task_id,
+            actor_id=context.user_id,
+            action="import.batch_item_corrected",
+            object_ref={
+                "batch_id": str(batch.id),
+                "sheet": sheet_name,
+                "group_id": group_id,
+                "edit_version": item.edit_version,
+            },
+            after_ref={
+                "preview_status": item.preview_status,
+                "task_id": str(item.task_id) if item.task_id else None,
+            },
+            result="SUCCESS",
+        )
+    )
+    await session.flush()
+    return await load_batch(session, batch_id=batch.id, context=context)
 
 
 async def load_batch(
@@ -348,6 +725,8 @@ async def load_batch(
                 "order_number": order.number if order else None,
                 "issues": item.issues,
                 "stop_result": item.stop_result,
+                "candidate": item.candidate_json if task is None else None,
+                "edit_version": item.edit_version,
             }
         )
 

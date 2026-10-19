@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import AppShell from './views/AppShell.vue'
 import InterfaceStatesView from './views/InterfaceStatesView.vue'
+import ImportBatchView from './views/ImportBatchView.vue'
 import LoginView from './views/LoginView.vue'
 import MasterDataView from './views/MasterDataView.vue'
 import OrderCenterView from './views/OrderCenterView.vue'
@@ -17,6 +18,7 @@ export const router = createRouter({
       children: [
         { path: '', name: 'workbench', component: TaskWorkbenchView },
         { path: 'tasks/:taskId', name: 'task-workbench', component: TaskWorkbenchView },
+        { path: 'imports/:batchId', name: 'import-batch', component: ImportBatchView },
         { path: 'orders', name: 'order-center', component: OrderCenterView },
         { path: 'admin/master-data', name: 'master-data', component: MasterDataView, meta: { requiresSystemAdmin: true } },
         { path: 'interface-states', name: 'interface-states', component: InterfaceStatesView },

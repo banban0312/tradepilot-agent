@@ -47,6 +47,7 @@ const savedForm = ref('')
 const activity = ref<WorkEvent[]>([])
 const loading = ref(false)
 const sending = ref(false)
+const creatingBatch = ref(false)
 const saving = ref(false)
 const reviewing = ref(false)
 const errorMessage = ref('')
@@ -385,8 +386,22 @@ async function processExcel(file?: File) {
     excelArtifactId.value = await importsApi.upload(file)
   }
   excelStatus.value = '正在校验工作表、分组和单元格…'
-  excelPreview.value = await importsApi.previewArtifact(excelArtifactId.value)
+  excelPreview.value = { ...(await importsApi.previewArtifact(excelArtifactId.value)), artifact_id: excelArtifactId.value }
   excelStatus.value = '分组校验完成；尚未创建订单或提交审批。'
+}
+
+async function createExcelBatch() {
+  if (!excelArtifactId.value || creatingBatch.value || !excelPreview.value?.groups.length) return
+  creatingBatch.value = true
+  errorMessage.value = ''
+  try {
+    const batch = await importsApi.createBatch(excelArtifactId.value)
+    await router.push({ name: 'import-batch', params: { batchId: batch.batch_id } })
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '创建导入批次失败。'
+  } finally {
+    creatingBatch.value = false
+  }
 }
 
 async function retryExcelPreview() {
@@ -856,7 +871,8 @@ async function openTask(taskId: string) {
         <div v-if="inputMode === 'excel' && excelPreview" class="excel-preview-summary">
           <strong>分组校验结果</strong><span>{{ excelPreview.summary.sheet_count }} 个工作表 · {{ excelPreview.summary.detail_rows }} 行明细 · {{ excelPreview.summary.group_count }} 个订单组 · {{ excelPreview.summary.needs_correction_groups }} 组需修正</span>
           <div v-for="group in excelPreview.groups" :key="group.group_id" class="excel-preview-group"><div><b>{{ group.group_id }}</b><span>{{ group.rows.length }} 行 · {{ group.status === 'READY_FOR_REVIEW' ? '待复核' : group.status === 'OVER_QUOTA_REVIEW' ? '超额待复核' : '需修正' }}<template v-if="group.total_amount"> · {{ formatMoney(group.total_amount) }}</template></span><small v-for="issue in group.issues" :key="`${issue.code}:${issue.locator.cell}`">{{ issue.locator.sheet }}!{{ issue.locator.cell ?? '行内字段' }}：{{ issue.message }}</small></div></div>
-          <small>当前为只读分组校验，不会创建订单或触发审批。</small>
+          <small>创建批次会为结构完整的订单组建立独立任务；仍需业务校验与人工逐笔审批，不会直接创建正式订单。</small>
+          <button class="primary-button" type="button" :disabled="creatingBatch || !excelPreview.groups.length" @click="createExcelBatch">{{ creatingBatch ? '正在建立批次…' : '建立批次并逐笔处理' }}</button>
         </div>
         <button v-if="inputMode === 'excel' && excelArtifactId && !excelPreview && !fileBusy" class="text-button" type="button" @click="retryExcelPreview">重试分组校验</button>
       </div>
