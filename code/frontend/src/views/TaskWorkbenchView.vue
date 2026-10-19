@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import NoticeBanner from '../components/NoticeBanner.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { useAuthStore } from '../stores/auth'
+import { useTaskWorkspaceStore, type WorkspaceEvent } from '../stores/taskWorkspace'
 import { artifactsApi, type Artifact, type ParseResult, type ParsedField } from '../services/artifacts'
 import { importsApi, type ImportPreview } from '../services/imports'
-import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type FailedTaskSpan, type FileFieldConfirmation, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
+import { tasksApi, type DraftCandidate, type FailedTaskSpan, type FileFieldConfirmation, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
 
-type WorkEvent = { type: string; seq: number; emitted_at: string; data: Record<string, unknown> }
+type WorkEvent = WorkspaceEvent
 type InputMode = 'text' | 'document' | 'excel'
 type DocumentEntry = {
   artifact: Artifact
@@ -22,6 +24,8 @@ type DocumentEntry = {
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const workspace = useTaskWorkspaceStore()
+const { task, draftForm, savedDraftForm, replyText, activity, commandSubmitting } = storeToRefs(workspace)
 const orderType = ref<OrderType>('SALES')
 const newTaskText = ref('')
 const inputMode = ref<InputMode>('text')
@@ -36,20 +40,15 @@ const fileBusy = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const evidenceSelections = ref<Record<string, string>>({})
 const applyingEvidence = ref(false)
-const replyText = ref('')
 const taskList = ref<TaskSummary[]>([])
-const task = ref<TaskSnapshot | null>(null)
-const draftForm = ref<DraftCandidate | null>(null)
 const materialMatches = ref<Record<number, MaterialMatchResult>>({})
 const matchingItems = ref(new Set<number>())
 const materialDecisions = ref(new Set<string>())
-const savedForm = ref('')
-const activity = ref<WorkEvent[]>([])
 const focusedFailureSpan = ref<FailedTaskSpan | null>(null)
 const focusedFailureError = ref('')
 const loadingFailureSpan = ref(false)
 const loading = ref(false)
-const sending = ref(false)
+const sending = commandSubmitting
 const creatingBatch = ref(false)
 const saving = ref(false)
 const reviewing = ref(false)
@@ -58,12 +57,11 @@ const noticeMessage = ref('')
 const reviewDialog = ref<null | 'RETURN' | 'REJECT'>(null)
 const reviewReason = ref('')
 const keepLocalDraft = ref(false)
-let eventSource: EventSource | null = null
 let taskGeneration = 0
 let failureSpanGeneration = 0
 
 const pageMode = computed(() => typeof route.params.taskId === 'string' ? 'task' : 'home')
-const isDirty = computed(() => Boolean(draftForm.value && JSON.stringify(editableCandidate(draftForm.value)) !== savedForm.value))
+const isDirty = computed(() => workspace.draftIsDirty)
 const canReply = computed(() => Boolean(task.value?.active_wait?.kind === 'INPUT' && task.value.available_actions.includes('INPUT')))
 const canEditDraft = computed(() => Boolean(task.value?.available_actions.includes('EDIT_DRAFT') && task.value.draft?.candidate))
 const canApprove = computed(() => Boolean(
@@ -212,37 +210,32 @@ function formatTime(value: string) {
 }
 
 function syncFormFromTask(snapshot: TaskSnapshot, force = false) {
-  const candidate = snapshot.draft?.candidate
-  if (!candidate) {
-    draftForm.value = null
-    savedForm.value = ''
+  const wasDirty = isDirty.value
+  workspace.syncDraftFromSnapshot(snapshot, force)
+  if (!snapshot.draft?.candidate) {
+    keepLocalDraft.value = false
+    materialMatches.value = {}
+    matchingItems.value.clear()
+    materialDecisions.value.clear()
     return
   }
-  if (!force && isDirty.value) {
+  if (!force && wasDirty) {
     keepLocalDraft.value = true
     return
   }
   materialMatches.value = {}
   matchingItems.value.clear()
   materialDecisions.value.clear()
-  draftForm.value = structuredClone(candidate)
-  savedForm.value = JSON.stringify(editableCandidate(draftForm.value))
   keepLocalDraft.value = false
 }
 
-async function refreshSnapshot(generation = taskGeneration) {
-  if (generation !== taskGeneration || typeof route.params.taskId !== 'string') return
+async function refreshSnapshot(viewGeneration = taskGeneration) {
+  if (viewGeneration !== taskGeneration || typeof route.params.taskId !== 'string') return
   try {
-    const snapshot = await tasksApi.get(route.params.taskId)
-    if (generation !== taskGeneration) return
-    const previousOrderId = task.value?.order_ref?.order_id
-    task.value = snapshot
-    if (!previousOrderId && snapshot.order_ref?.order_id) {
-      window.dispatchEvent(new CustomEvent('tradepilot:order-created', { detail: { orderId: snapshot.order_ref.order_id } }))
-    }
-    syncFormFromTask(snapshot)
+    const snapshot = await workspace.refreshSnapshot(route.params.taskId)
+    if (snapshot && viewGeneration === taskGeneration) syncFormFromTask(snapshot)
   } catch (error) {
-    if (generation === taskGeneration) errorMessage.value = error instanceof Error ? error.message : '读取任务失败。'
+    if (viewGeneration === taskGeneration) errorMessage.value = error instanceof Error ? error.message : '读取任务失败。'
   }
 }
 
@@ -272,58 +265,16 @@ function openCreatedOrder() {
   void router.push({ name: 'order-center', query: { order_id: orderId } })
 }
 
-function stopEvents() {
-  eventSource?.close()
-  eventSource = null
-}
-
-function connectEvents(taskId: string, generation: number) {
-  stopEvents()
-  // 首次连接不带游标时服务端从 0 重放可见历史；重连由浏览器携带 Last-Event-ID 续接。
-  const source = new EventSource(`/api/v1/tasks/${encodeURIComponent(taskId)}/events`)
-  eventSource = source
-  const receive = (event: Event) => {
-    if (generation !== taskGeneration) return
-    const message = event as MessageEvent<string>
-    try {
-      const envelope = JSON.parse(message.data) as { seq?: number; emitted_at?: string; data?: Record<string, unknown> }
-      const payload = envelope.data ?? {}
-      const eventData = payload.data && typeof payload.data === 'object'
-        ? payload.data as Record<string, unknown>
-        : payload
-      activity.value = [{
-        type: event.type,
-        seq: envelope.seq ?? 0,
-        emitted_at: envelope.emitted_at ?? new Date().toISOString(),
-        data: eventData,
-      }, ...activity.value].slice(0, 12)
-    } catch {
-      activity.value = [{ type: event.type, seq: 0, emitted_at: new Date().toISOString(), data: {} }, ...activity.value].slice(0, 12)
-    }
-    void refreshSnapshot(generation)
-  }
-  for (const type of TASK_EVENT_TYPES) source.addEventListener(type, receive)
-  source.onerror = () => {
-    // EventSource 会按 Last-Event-ID 自动重连；先重新读取权威快照，再接收后续事件。
-    void refreshSnapshot(generation)
-  }
-}
-
 async function loadTask(taskId: string) {
   const generation = ++taskGeneration
-  stopEvents()
-  activity.value = []
   errorMessage.value = ''
   loading.value = true
-  task.value = null
-  draftForm.value = null
   try {
-    const snapshot = await tasksApi.get(taskId)
+    const snapshot = await workspace.activateTask(taskId)
     if (generation !== taskGeneration) return
-    task.value = snapshot
-    syncFormFromTask(snapshot, true)
+    if (!snapshot) return
+    syncFormFromTask(snapshot)
     await loadTaskArtifacts(taskId)
-    connectEvents(taskId, generation)
   } catch (error) {
     if (generation === taskGeneration) errorMessage.value = error instanceof Error ? error.message : '读取任务失败。'
   } finally {
@@ -335,9 +286,6 @@ watch(() => route.params.taskId, (value) => {
   if (typeof value === 'string') void loadTask(value)
   else {
     taskGeneration += 1
-    stopEvents()
-    task.value = null
-    draftForm.value = null
     taskArtifacts.value = []
     activeArtifactId.value = ''
     pendingDocumentIds.value = []
@@ -350,14 +298,17 @@ watch([() => route.params.taskId, () => route.query.failed_span_id], () => {
 }, { immediate: true })
 
 watch(() => task.value?.draft?.version, async (version, previous) => {
-  if (version && previous && version !== previous && isDirty.value && !saving.value) {
-    keepLocalDraft.value = true
-    await nextTick()
+  if (version && previous && version !== previous) {
+    if (isDirty.value && !saving.value) {
+      keepLocalDraft.value = true
+      await nextTick()
+    } else if (task.value) {
+      syncFormFromTask(task.value, true)
+    }
   }
 })
 
 onBeforeUnmount(() => {
-  stopEvents()
   for (const entry of documents.value) {
     if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl)
   }
@@ -593,7 +544,7 @@ async function applySelectedEvidence() {
   draftForm.value = updated
   try {
     await tasksApi.patchDraft(task.value, cleanCandidate(updated), confirmations)
-    savedForm.value = JSON.stringify(editableCandidate(updated))
+    savedDraftForm.value = JSON.stringify(editableCandidate(updated))
     keepLocalDraft.value = false
     evidenceSelections.value = {}
     noticeMessage.value = '字段确认已记录，系统正在重新校验；草稿内容变化时会生成新版本，该版本仍需人工审批。'
@@ -645,25 +596,22 @@ async function createTask() {
 async function continueLastTask() {
   if (!taskList.value.length) await loadRecentTasks()
   const latest = taskList.value[0]
-  if (latest) await router.push({ name: 'task-workbench', params: { taskId: latest.task_id } })
+  if (latest) {
+    workspace.returnPath = route.fullPath
+    await router.push({ name: 'task-workbench', params: { taskId: latest.task_id } })
+  }
   else noticeMessage.value = '当前账号还没有可继续的任务。'
 }
 
 async function sendReply() {
   const text = replyText.value.trim()
   if (!task.value || !text || sending.value || !canReply.value) return
-  sending.value = true
   errorMessage.value = ''
   try {
-    await tasksApi.supplement(task.value, text)
-    replyText.value = ''
-    noticeMessage.value = '补充内容已接收，任务已进入队列；后续状态以服务端更新为准。'
-    await refreshSnapshot()
+    const accepted = await workspace.submitReply()
+    if (accepted) noticeMessage.value = '补充内容已接收，任务已进入队列；后续状态以服务端更新为准。'
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '补充信息失败。'
-    if ((error as { status?: number }).status === 409) await refreshSnapshot()
-  } finally {
-    sending.value = false
   }
 }
 
@@ -690,7 +638,7 @@ async function saveDraft() {
   errorMessage.value = ''
   try {
     await tasksApi.patchDraft(task.value, cleanCandidate(submitted))
-    savedForm.value = JSON.stringify(editableCandidate(submitted))
+    savedDraftForm.value = JSON.stringify(editableCandidate(submitted))
     keepLocalDraft.value = false
     noticeMessage.value = '草稿修改已接收，系统正在重新校验；当前版本尚未通过审批。'
     await refreshSnapshot()
@@ -847,7 +795,13 @@ function stateDescription(state: TaskState) {
 }
 
 async function openTask(taskId: string) {
+  if (route.name !== 'task-workbench') workspace.returnPath = route.fullPath
   await router.push({ name: 'task-workbench', params: { taskId } })
+}
+
+async function switchToWidget() {
+  workspace.widgetOpen = true
+  await router.replace(workspace.returnPath || '/orders')
 }
 </script>
 
@@ -926,7 +880,7 @@ async function openTask(taskId: string) {
     <template v-if="task">
       <section class="task-progress-bar">
         <div><p class="eyebrow">{{ task.order_type === 'SALES' ? '销售订单' : '采购订单' }} / 任务 {{ task.task_id.slice(0, 8) }}</p><h1>{{ task.draft ? `订单草稿 · 第 ${task.draft.version} 版` : '订单处理任务' }}</h1><p>{{ stateDescription(task.state) }}</p></div>
-        <div class="task-progress-bar__right"><StatusBadge :label="stateLabels[task.state]" :tone="stateTone" /><button class="secondary-button" type="button" @click="refreshSnapshot()"><AppIcon name="refresh" :size="16" />刷新</button><RouterLink class="secondary-button" :to="{ name: 'workbench' }"><AppIcon name="plus" :size="16" />新任务</RouterLink></div>
+        <div class="task-progress-bar__right"><StatusBadge :label="stateLabels[task.state]" :tone="stateTone" /><button class="secondary-button" type="button" @click="switchToWidget">切换至悬浮窗</button><button class="secondary-button" type="button" @click="refreshSnapshot()"><AppIcon name="refresh" :size="16" />刷新</button><RouterLink class="secondary-button" :to="{ name: 'workbench' }"><AppIcon name="plus" :size="16" />新任务</RouterLink></div>
       </section>
       <NoticeBanner v-if="task.last_error" tone="danger" :message="typeof task.last_error.message === 'string' ? task.last_error.message : typeof task.last_error.code === 'string' ? `处理失败：${task.last_error.code}` : '任务处理失败，请查看运行轨迹并刷新。'" />
       <section v-if="loadingFailureSpan || focusedFailureSpan || focusedFailureError" class="focused-failure-span" aria-live="polite">

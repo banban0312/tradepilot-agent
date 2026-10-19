@@ -516,3 +516,39 @@ a { color: inherit; text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.floating-task-bubble { position: fixed; z-index: 41; right: 24px; bottom: 24px; display: grid; width: 54px; height: 54px; place-items: center; border: 0; border-radius: 50%; background: var(--color-primary); color: #fff; box-shadow: 0 8px 24px rgb(12 38 52 / 24%); cursor: pointer; }
+.floating-task-bubble__dot { position: absolute; top: 3px; right: 4px; width: 11px; height: 11px; border: 2px solid #fff; border-radius: 50%; background: #ef9d37; }
+.floating-task-panel { position: fixed; z-index: 41; display: flex; width: min(390px, calc(100vw - 16px)); max-height: min(530px, calc(100vh - 16px)); flex-direction: column; overflow: hidden; border: 1px solid #dce6eb; border-radius: 8px; background: #fff; box-shadow: 0 12px 38px rgb(12 38 52 / 20%); }
+.floating-task-panel__header { display: flex; min-height: 48px; align-items: center; justify-content: space-between; padding: 0 13px; background: #07828b; color: white; cursor: move; touch-action: none; user-select: none; }
+.floating-task-panel__header > div:first-child { display: flex; align-items: center; gap: 9px; }
+.floating-task-panel__header strong { font-size: 13px; }
+.floating-task-panel__actions { display: flex; gap: 5px; }
+.floating-task-panel__actions button { width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: #fff; font-size: 18px; cursor: pointer; }
+.floating-task-panel__actions button:hover { background: rgb(255 255 255 / 16%); }
+.floating-task-panel__body { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 11px; overflow: auto; padding: 13px; }
+.floating-task-panel__taskline { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #6a8290; font-size: 11px; }
+.floating-task-panel__messages { display: grid; max-height: 270px; gap: 9px; overflow: auto; }
+.floating-task-message { padding: 10px 11px; border-radius: 5px; background: #f0f5f7; }
+.floating-task-message--notice { background: #fff8eb; }
+.floating-task-message > span { color: #14808a; font-size: 10px; font-weight: 650; }
+.floating-task-message--notice > span { color: #a36911; }
+.floating-task-message p { margin: 5px 0 0; overflow-wrap: anywhere; color: #314957; font-size: 11px; line-height: 1.6; white-space: pre-wrap; }
+.floating-task-panel__draft { display: flex; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid #e1eaee; border-radius: 5px; color: #536d7b; font-size: 10px; }
+.floating-task-panel__draft strong { color: #147f89; }
+.floating-task-panel__composer { display: flex; align-items: flex-end; gap: 8px; }
+.floating-task-panel__composer textarea { min-width: 0; min-height: 54px; flex: 1; resize: vertical; padding: 9px; border: 1px solid #d9e4e9; border-radius: 5px; font: inherit; font-size: 11px; }
+.floating-task-panel__composer .primary-button { min-height: 36px; padding: 0 12px; font-size: 11px; }
+.floating-task-panel__hint, .floating-task-panel__footer { margin: 0; color: #8498a3; font-size: 10px; line-height: 1.5; }
+.floating-task-panel__error { margin: 0; color: var(--color-danger); font-size: 11px; }
+.floating-task-panel__open { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 2px; border: 0; background: transparent; color: #087e88; font-size: 11px; font-weight: 600; cursor: pointer; }
+.floating-task-panel__footer { padding: 0 13px 12px; }
+.floating-task-panel__empty { display: grid; justify-items: center; gap: 8px; padding: 28px 12px; color: #526d7b; text-align: center; }
+.floating-task-panel__empty p { margin: 0; font-size: 11px; line-height: 1.6; }
+.floating-task-panel__recent-list { display: grid; width: 100%; gap: 6px; margin: 4px 0; }
+.floating-task-panel__recent-list button { display: grid; gap: 4px; width: 100%; padding: 9px 10px; border: 1px solid #e1eaee; border-radius: 5px; background: #fff; color: #354f5d; text-align: left; cursor: pointer; }
+.floating-task-panel__recent-list button:hover { border-color: #49a7ac; background: #f6fbfc; }
+.floating-task-panel__recent-list strong { font-size: 11px; font-weight: 600; }
+.floating-task-panel__recent-list span { color: #7b919c; font-size: 10px; }
+.floating-task-panel__empty .primary-button { min-height: 36px; margin-top: 4px; }
+@media (max-width: 520px) { .floating-task-panel { width: calc(100vw - 16px); max-height: calc(100vh - 16px); } .floating-task-bubble { right: 14px; bottom: 14px; } }

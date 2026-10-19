@@ -5,11 +5,14 @@ import AppDrawer from '../components/AppDrawer.vue'
 import AppIcon from '../components/AppIcon.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import ToastMessage from '../components/ToastMessage.vue'
+import FloatingTaskWidget from '../components/FloatingTaskWidget.vue'
 import { roleLabels, useAuthStore } from '../stores/auth'
 import { useUiStore } from '../stores/ui'
+import { useTaskWorkspaceStore } from '../stores/taskWorkspace'
 
 const auth = useAuthStore()
 const ui = useUiStore()
+const taskWorkspace = useTaskWorkspaceStore()
 const route = useRoute()
 const router = useRouter()
 const helpOpen = ref(false)
@@ -42,6 +45,7 @@ function unavailable(label: string) {
 
 async function logout() {
   if (!await auth.logout()) return
+  taskWorkspace.clearWorkspace()
   await router.replace({ name: 'login' })
 }
 </script>
@@ -108,5 +112,6 @@ async function logout() {
       <StatusBadge label="任务创建入口将在后续阶段接入" tone="warning" />
     </AppDrawer>
     <ToastMessage />
+    <FloatingTaskWidget />
   </div>
 </template>
