@@ -1,4 +1,4 @@
-param([switch]$IssueOnly, [switch]$Issue030, [switch]$Issue031, [switch]$Issue033)
+param([switch]$IssueOnly, [switch]$Issue030, [switch]$Issue031, [switch]$Issue033, [switch]$Issue034)
 
 $ErrorActionPreference = 'Stop'
 $codeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -10,7 +10,7 @@ $composeArgs = @('compose', '--project-name', $projectName, '--env-file', 'backe
 
 if (-not (Test-Path -LiteralPath $envFile)) { throw '未找到 code/backend/.env；请先按 backend/.env.example 配置本机验收环境。' }
 
-$environmentNames = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'MCP_CONTEXT_SIGNING_KEY')
+$environmentNames = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'MCP_CONTEXT_SIGNING_KEY', 'RUNTIME_CONFIG_ENCRYPTION_KEY')
 $oldEnvironment = @{}
 foreach ($name in $environmentNames) { $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 
@@ -44,6 +44,7 @@ function Set-IsolatedEnvironment {
     $key = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
     $env:MCP_CONTEXT_SIGNING_KEY = [Convert]::ToBase64String($key)
+    $env:RUNTIME_CONFIG_ENCRYPTION_KEY = [Convert]::ToBase64String($key).Replace('+', '-').Replace('/', '_')
     [Array]::Clear($key, 0, $key.Length)
 }
 
@@ -53,10 +54,10 @@ try {
         Set-IsolatedEnvironment
         @(
             'services:',
-            "  api:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
+            "  api:`n    image: $imageName`n    environment:`n      RUNTIME_CONFIG_ENCRYPTION_KEY: $env:RUNTIME_CONFIG_ENCRYPTION_KEY`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
             "  worker:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
             "  mcp:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
-            "  verify:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''"
+            "  verify:`n    image: $imageName`n    environment:`n      RUNTIME_CONFIG_ENCRYPTION_KEY: $env:RUNTIME_CONFIG_ENCRYPTION_KEY`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''"
         ) -join "`n" | Set-Content -LiteralPath $overrideFile -Encoding utf8
 
         Write-Host "使用隔离项目 $projectName、独立数据库和附件卷；不启动 Worker、不调用在线模型，也不会重启或清理主开发服务。"
@@ -70,6 +71,7 @@ try {
         if ($Issue030) { $pythonFiles += @('alembic/versions/f5b0374c9a1d_import_batch_item_editing.py', '/workspace/tests/issues/test_issue_030.py') }
         if ($Issue031) { $pythonFiles += @('app/tasks/routes.py', '/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_030.py', '/workspace/tests/issues/test_issue_031.py') }
         if ($Issue033) { $pythonFiles = @('app/tasks/routes.py', '/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_029.py', '/workspace/tests/issues/test_issue_033.py') }
+        if ($Issue034) { $pythonFiles = @('app/admin_config/routes.py', 'app/artifacts/routes.py', 'app/config.py', 'app/main.py', 'app/models.py', 'app/observability/service.py', 'app/runtime_config.py', 'app/storage/cleanup.py', 'app/tasks/routes.py', 'app/tasks/service.py', 'app/worker/queue.py', 'app/worker/workflow.py', 'alembic/versions/8a34c9f10d62_runtime_config_snapshots.py', '/workspace/tests/issues/test_issue_034.py') }
         Invoke-Compose (@('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'ruff', 'check', '--ignore', 'EXE002', '--config', 'lint.isort.known-first-party=["app"]') + $pythonFiles)
         Invoke-Compose (@('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'ruff', 'format', '--check') + $pythonFiles)
         Invoke-Compose (@('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'compileall', '-q') + $pythonFiles)
@@ -78,6 +80,7 @@ try {
         if ($Issue030) { $testFiles += '/workspace/tests/issues/test_issue_030.py' }
         if ($Issue031) { $testFiles = @('/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_029.py', '/workspace/tests/issues/test_issue_030.py', '/workspace/tests/issues/test_issue_031.py') }
         if ($Issue033) { $testFiles = @('/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_029.py', '/workspace/tests/issues/test_issue_033.py') }
+        if ($Issue034) { $testFiles = @('/workspace/tests/issues/test_issue_006.py', '/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_034.py') }
         if (-not $IssueOnly) {
             $testFiles = @('/workspace/tests/issues/test_issue_010.py', '/workspace/tests/issues/test_issue_017.py', '/workspace/tests/issues/test_issue_018.py', '/workspace/tests/issues/test_issue_022.py', '/workspace/tests/issues/test_issue_023.py', '/workspace/tests/issues/test_issue_024.py', '/workspace/tests/issues/test_issue_025.py', '/workspace/tests/issues/test_issue_026.py', '/workspace/tests/issues/test_issue_027.py', '/workspace/tests/issues/test_issue_028.py', '/workspace/tests/issues/test_issue_029.py', '/workspace/tests/issues/test_issue_030.py', '/workspace/tests/issues/test_issue_031.py')
         }
@@ -85,6 +88,7 @@ try {
         if ($IssueOnly) {
             if ($Issue031) { Write-Host 'M5-03 单项验收通过：批次状态核实、真实失败轨迹定位和原任务安全恢复均完成。' }
             elseif ($Issue033) { Write-Host 'M5-05 单项验收通过：历史筛选、轨迹分页、用量覆盖、敏感字段过滤和部门隔离均完成。' }
+            elseif ($Issue034) { Write-Host 'M5-06 单项验收通过：配置版本与任务快照、密钥加密、审计权限及 #6/#17 回归均完成。' }
             elseif ($Issue030) { Write-Host 'M5-01/M5-02 单项验收通过：批次持久化、组内修正、乐观版本、5 路并发和停止边界均完成。' }
             else { Write-Host 'M5-01 单项验收通过：批次父子持久化、Excel 源行关联、幂等、5 路并发和停止边界均完成。' }
         }

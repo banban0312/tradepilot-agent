@@ -13,8 +13,9 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from app.models import AgentTask, TaskCommand, TaskJob, TaskSession
+from app.models import AgentTask, ConfigSnapshot, TaskCommand, TaskJob, TaskSession
 from app.observability.service import append_task_event_on_connection
+from app.runtime_config import environment_config, new_snapshot
 
 MAX_ACTIVE_TASKS = 5
 JOB_KIND_RUN_TASK = "RUN_TASK"
@@ -108,6 +109,18 @@ async def create_task(
         )
         if task_session is None or task_session.owner_id != owner_id:
             raise LookupError("任务会话不存在")
+    await session.execute(text("SELECT pg_advisory_xact_lock(74192832)"))
+    config_snapshot_id = await session.scalar(
+        select(ConfigSnapshot.id)
+        .where(ConfigSnapshot.is_current.is_(True))
+        .order_by(ConfigSnapshot.version.desc())
+        .limit(1)
+    )
+    if config_snapshot_id is None:
+        baseline = new_snapshot(content=environment_config(), version=1, actor_id=None)
+        session.add(baseline)
+        await session.flush()
+        config_snapshot_id = baseline.id
     task = AgentTask(
         id=task_id or uuid4(),
         session_id=task_session.id,
@@ -115,6 +128,7 @@ async def create_task(
         department_id=department_id,
         task_type=task_type,
         state="QUEUED",
+        config_snapshot_id=config_snapshot_id,
     )
     session.add(task)
     await session.flush()
@@ -228,7 +242,11 @@ async def count_active_tasks(session: AsyncSession) -> int:
 
 
 async def try_claim_job(
-    session: AsyncSession, *, worker_id: str, supported_kinds: frozenset[str]
+    session: AsyncSession,
+    *,
+    worker_id: str,
+    supported_kinds: frozenset[str],
+    max_active_tasks: int = MAX_ACTIVE_TASKS,
 ) -> TaskJob | None:
     """使用 SKIP LOCKED 做短事务领取，不在模型/OCR 期间持有行锁。"""
     if not supported_kinds:
@@ -243,7 +261,7 @@ async def try_claim_job(
         )
         or 0
     )
-    if active >= MAX_ACTIVE_TASKS:
+    if active >= max(1, min(MAX_ACTIVE_TASKS, max_active_tasks)):
         return None
     job = await session.scalar(
         select(TaskJob)

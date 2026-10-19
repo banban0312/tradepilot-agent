@@ -49,6 +49,7 @@ from app.models import (
     AgentTask,
     AuditEvent,
     AuthSession,
+    ConfigSnapshot,
     Contract,
     ContractBalance,
     Customer,
@@ -1803,8 +1804,24 @@ async def review_task(
 
     if task.state != "WAITING_APPROVAL":
         raise _api_error(409, "TASK_NOT_WAITING", "任务当前不等待审批")
+    bound_config = (
+        await session.get(ConfigSnapshot, task.config_snapshot_id)
+        if task.config_snapshot_id
+        else None
+    )
+    demo_approval_enabled = bool(
+        bound_config
+        and bound_config.content.get("approval_mode") == "demo_self_approval"
+    )
+    task_timezone = (
+        bound_config.content.get("business_timezone")
+        if bound_config
+        else settings.business_timezone
+    )
+    if not isinstance(task_timezone, str):
+        task_timezone = settings.business_timezone
     if context.user_id == task.owner_id and not (
-        settings.demo_mode and settings.demo_allow_self_approval
+        settings.demo_mode and demo_approval_enabled
     ):
         raise _api_error(403, "APPROVAL_FORBIDDEN", "经办人不能批准自己的草稿")
     wait = await session.scalar(
@@ -1848,7 +1865,7 @@ async def review_task(
                 session,
                 candidate=snapshot.candidate,
                 actor=context,
-                business_date=datetime.now(ZoneInfo(settings.business_timezone)).date(),
+                business_date=datetime.now(ZoneInfo(task_timezone)).date(),
             )
         except ValueError as exc:
             raise _api_error(

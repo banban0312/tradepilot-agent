@@ -43,6 +43,7 @@ from app.models import (
 )
 from app.observability.service import finish_span, start_span
 from app.orders.commit import OrderCommitResultUnknown, commit_approved_order
+from app.runtime_config import config_for_snapshot
 from app.tasks.checkpointer import EpochFencedPostgresSaver
 from app.tasks.service import TaskExecutionLease
 from app.tasks.waits import (
@@ -422,6 +423,10 @@ async def create_run_task_handler(
                 task_type=task.task_type,
                 department_id=task.department_id,
                 graph_version=task.graph_version,
+                config_snapshot_id=task.config_snapshot_id,
+            )
+            effective_config = await config_for_snapshot(
+                session, task.config_snapshot_id
             )
             command_copy = SimpleNamespace(
                 id=command.id,
@@ -446,7 +451,7 @@ async def create_run_task_handler(
             job=job,
             task=task_copy,
             actor=actor,
-            config=config,
+            config=effective_config,
         )
         saver = EpochFencedPostgresSaver(lease)
         await saver.setup()

@@ -30,6 +30,7 @@ from app.models import AgentTask, AuditEvent, InputArtifact, TaskArtifact, User
 from app.observability.service import append_task_event
 from app.parsing.image import parse_image
 from app.parsing.pdf import PdfParseError, parse_pdf, sha256_file
+from app.runtime_config import current_snapshot
 from app.storage.files import (
     FileUploadError,
     content_disposition,
@@ -224,9 +225,15 @@ async def parse_artifact(
         raise _api_error(503, "FILE_UNREADABLE", "附件存储暂不可用")
     started = time.monotonic()
     try:
+        runtime_snapshot = await current_snapshot(session)
+        configured_ocr_provider = (
+            runtime_snapshot.content.get("ocr_provider")
+            if runtime_snapshot
+            else settings.ocr_provider
+        )
         if (
             parse_intent == "receipt_image"
-            and settings.ocr_provider != "local_tesseract"
+            and configured_ocr_provider != "local_tesseract"
         ):
             raise PdfParseError("OCR_UNAVAILABLE", "当前未配置可用的图片 OCR 引擎", 503)
         try:
