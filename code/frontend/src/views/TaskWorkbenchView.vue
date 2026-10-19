@@ -5,15 +5,37 @@ import AppIcon from '../components/AppIcon.vue'
 import NoticeBanner from '../components/NoticeBanner.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { useAuthStore } from '../stores/auth'
-import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
+import { artifactsApi, type Artifact, type ParseResult, type ParsedField } from '../services/artifacts'
+import { importsApi, type ImportPreview } from '../services/imports'
+import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type FileFieldConfirmation, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
 
 type WorkEvent = { type: string; seq: number; emitted_at: string; data: Record<string, unknown> }
+type InputMode = 'text' | 'document' | 'excel'
+type DocumentEntry = {
+  artifact: Artifact
+  result: ParseResult | null
+  previewUrl: string
+  status: 'uploaded' | 'parsing' | 'parsed' | 'failed'
+  message: string
+}
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const orderType = ref<OrderType>('SALES')
 const newTaskText = ref('')
+const inputMode = ref<InputMode>('text')
+const documents = ref<DocumentEntry[]>([])
+const pendingDocumentIds = ref<string[]>([])
+const taskArtifacts = ref<Artifact[]>([])
+const activeArtifactId = ref('')
+const excelArtifactId = ref('')
+const excelPreview = ref<ImportPreview | null>(null)
+const excelStatus = ref('')
+const fileBusy = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const evidenceSelections = ref<Record<string, string>>({})
+const applyingEvidence = ref(false)
 const replyText = ref('')
 const taskList = ref<TaskSummary[]>([])
 const task = ref<TaskSnapshot | null>(null)
@@ -44,6 +66,18 @@ const canApprove = computed(() => Boolean(
   && task.value.available_actions.includes('APPROVE')
   && auth.identity?.roles.includes('business_approver'),
 ))
+const activeDocument = computed(() => documents.value.find(item => item.artifact.artifact_id === activeArtifactId.value) ?? null)
+const activeEvidencePage = computed(() => {
+  if (!activeDocument.value?.result) return 1
+  for (const [index, field] of activeDocument.value.result.fields.entries()) {
+    if (evidenceSelections.value[field.field] === evidenceFieldId(field, index)) return field.page_number
+  }
+  return activeDocument.value.result.fields[0]?.page_number ?? 1
+})
+const canUploadTaskFile = computed(() => Boolean(
+  task.value && canEditDraft.value && ['QUEUED', 'WAITING_INPUT', 'BLOCKED_RULE'].includes(task.value.state),
+))
+const selectedEvidenceCount = computed(() => Object.values(evidenceSelections.value).filter(Boolean).length)
 const stateLabels: Record<TaskState, string> = {
   QUEUED: '排队中', RUNNING: '处理中', WAITING_INPUT: '等待补充', WAITING_APPROVAL: '等待审批',
   SUBMITTING: '正在提交', BLOCKED_RULE: '规则阻断', FAILED: '处理失败', COMPLETED: '已完成', REJECTED: '已拒绝',
@@ -263,6 +297,7 @@ async function loadTask(taskId: string) {
     if (generation !== taskGeneration) return
     task.value = snapshot
     syncFormFromTask(snapshot, true)
+    await loadTaskArtifacts(taskId)
     connectEvents(taskId, generation)
   } catch (error) {
     if (generation === taskGeneration) errorMessage.value = error instanceof Error ? error.message : '读取任务失败。'
@@ -278,6 +313,9 @@ watch(() => route.params.taskId, (value) => {
     stopEvents()
     task.value = null
     draftForm.value = null
+    taskArtifacts.value = []
+    activeArtifactId.value = ''
+    pendingDocumentIds.value = []
     errorMessage.value = ''
   }
 }, { immediate: true })
@@ -289,7 +327,245 @@ watch(() => task.value?.draft?.version, async (version, previous) => {
   }
 })
 
-onBeforeUnmount(stopEvents)
+onBeforeUnmount(() => {
+  stopEvents()
+  for (const entry of documents.value) {
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl)
+  }
+})
+
+function entryFor(artifact: Artifact) {
+  let entry = documents.value.find(item => item.artifact.artifact_id === artifact.artifact_id)
+  if (!entry) {
+    entry = { artifact, result: null, previewUrl: '', status: 'uploaded', message: '' }
+    documents.value.push(entry)
+  } else {
+    entry.artifact = artifact
+  }
+  return entry
+}
+
+async function loadArtifactPreview(entry: DocumentEntry) {
+  if (entry.previewUrl) return
+  const content = await artifactsApi.content(entry.artifact.artifact_id)
+  entry.previewUrl = URL.createObjectURL(content)
+}
+
+async function parseDocument(entry: DocumentEntry, force = false) {
+  if (entry.status === 'parsing' || (entry.result && !force)) return
+  entry.status = 'parsing'
+  entry.message = ''
+  try {
+    entry.result = await artifactsApi.parse(entry.artifact.artifact_id)
+    entry.status = 'parsed'
+    evidenceSelections.value = {}
+  } catch (error) {
+    entry.status = 'failed'
+    entry.message = error instanceof Error ? error.message : '文件解析失败。'
+  }
+  try {
+    await loadArtifactPreview(entry)
+  } catch (error) {
+    if (!entry.message) entry.message = error instanceof Error ? error.message : '原文件预览加载失败。'
+  }
+}
+
+function fileIntent(file: File) {
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  if (extension === 'pdf') return 'contract_pdf' as const
+  if (['png', 'jpg', 'jpeg'].includes(extension ?? '')) return 'receipt_image' as const
+  if (extension === 'xlsx') return 'order_xlsx' as const
+  throw new Error('仅支持 PDF、PNG、JPG 和 XLSX 文件。')
+}
+
+async function processExcel(file?: File) {
+  if (!excelArtifactId.value) {
+    if (!file) throw new Error('请重新选择尚未上传的 Excel 文件。')
+    excelStatus.value = '正在安全上传 Excel…'
+    excelArtifactId.value = await importsApi.upload(file)
+  }
+  excelStatus.value = '正在校验工作表、分组和单元格…'
+  excelPreview.value = await importsApi.previewArtifact(excelArtifactId.value)
+  excelStatus.value = '分组校验完成；尚未创建订单或提交审批。'
+}
+
+async function retryExcelPreview() {
+  fileBusy.value = true
+  errorMessage.value = ''
+  try { await processExcel() }
+  catch (error) { errorMessage.value = error instanceof Error ? error.message : 'Excel 分组校验失败。' }
+  finally { fileBusy.value = false }
+}
+
+async function handleFiles(files: FileList | File[]) {
+  const file = files[0]
+  if (!file || fileBusy.value) return
+  fileBusy.value = true
+  errorMessage.value = ''
+  try {
+    const intent = fileIntent(file)
+    if (pageMode.value === 'home' && inputMode.value === 'excel' && intent !== 'order_xlsx') {
+      throw new Error('Excel 面板只接受 .xlsx 文件。')
+    }
+    if (pageMode.value === 'home' && inputMode.value !== 'excel' && intent === 'order_xlsx') {
+      throw new Error('请切换到 Excel 面板上传 .xlsx 文件。')
+    }
+    if (intent === 'order_xlsx') {
+      if (pageMode.value !== 'home') throw new Error('Excel 文件请在新任务页进行分组校验。')
+      if (file.size > 10 * 1024 * 1024) throw new Error('Excel 文件不能超过 10 MB。')
+      excelPreview.value = null
+      excelArtifactId.value = ''
+      await processExcel(file)
+      return
+    }
+    const limit = intent === 'contract_pdf' ? 20 * 1024 * 1024 : 10 * 1024 * 1024
+    if (file.size > limit) throw new Error(`文件不能超过 ${intent === 'contract_pdf' ? '20' : '10'} MB。`)
+    if (pageMode.value === 'task' && (!task.value || !canUploadTaskFile.value)) {
+      throw new Error('任务当前不接受附件；请等待补充信息或规则修正步骤。')
+    }
+    const artifact = await artifactsApi.upload(file, intent, pageMode.value === 'task' ? task.value?.task_id : undefined)
+    const entry = entryFor(artifact)
+    activeArtifactId.value = artifact.artifact_id
+    if (pageMode.value === 'home') pendingDocumentIds.value.push(artifact.artifact_id)
+    else taskArtifacts.value = [...taskArtifacts.value, artifact]
+    await parseDocument(entry)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '文件处理失败。'
+  } finally {
+    fileBusy.value = false
+    if (fileInput.value) fileInput.value.value = ''
+  }
+}
+
+function onFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.files) void handleFiles(input.files)
+}
+
+function onFileDrop(event: DragEvent) {
+  event.preventDefault()
+  if (event.dataTransfer?.files) void handleFiles(event.dataTransfer.files)
+}
+
+async function inspectArtifact(artifact: Artifact) {
+  if (activeArtifactId.value !== artifact.artifact_id) evidenceSelections.value = {}
+  activeArtifactId.value = artifact.artifact_id
+  const entry = entryFor(artifact)
+  if (!entry.result) await parseDocument(entry)
+  else {
+    try { await loadArtifactPreview(entry) }
+    catch (error) { entry.message = error instanceof Error ? error.message : '原文件预览加载失败。' }
+  }
+}
+
+async function loadTaskArtifacts(taskId: string) {
+  try {
+    taskArtifacts.value = await artifactsApi.listTask(taskId)
+    for (const artifact of taskArtifacts.value) entryFor(artifact)
+    if (!taskArtifacts.value.some(item => item.artifact_id === activeArtifactId.value)) {
+      activeArtifactId.value = taskArtifacts.value[0]?.artifact_id ?? ''
+      evidenceSelections.value = {}
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取任务附件失败。'
+  }
+}
+
+function fieldLabelForEvidence(field: string) {
+  const labels: Record<string, string> = {
+    contract_number: '合同编号', customer: '客户名称', material: '物料名称',
+    specification: '规格型号', quantity: '数量', amount: '合同金额',
+    delivery_date: '交期', recipient: '联系人', delivery_address: '收货地址',
+  }
+  return labels[field] ?? field
+}
+
+function fieldPathForEvidence(field: ParsedField) {
+  const direct: Record<string, string> = {
+    delivery_date: 'delivery_date', delivery_address: 'address', recipient: 'contact',
+    material: 'items[0].raw_name', specification: 'items[0].specification',
+    quantity: 'items[0].quantity',
+  }
+  return direct[field.field] ?? null
+}
+
+function evidenceFieldId(field: ParsedField, index: number) {
+  return `${activeArtifactId.value}:${field.field}:${field.page_number}:${index}`
+}
+
+function normalizeEvidenceValue(field: ParsedField) {
+  if (field.field !== 'delivery_date') return field.value
+  const match = field.value.match(/^(\d{4})[年./-]\s*(\d{1,2})[月./-]\s*(\d{1,2})日?$/)
+  return match ? `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}` : field.value
+}
+
+function selectedFileConfirmations(): FileFieldConfirmation[] {
+  if (!activeDocument.value?.result) return []
+  const confirmations: FileFieldConfirmation[] = []
+  for (const [index, field] of activeDocument.value.result.fields.entries()) {
+    if (evidenceSelections.value[field.field] !== evidenceFieldId(field, index)) continue
+    const value = normalizeEvidenceValue(field)
+    const paths = field.field === 'quantity' && field.unit
+      ? [{ field_path: 'items[0].quantity', value }, { field_path: 'items[0].unit', value: field.unit }]
+      : [{ field_path: fieldPathForEvidence(field)!, value }]
+    for (const mapped of paths) {
+      confirmations.push({
+        field_path: mapped.field_path,
+        artifact_id: activeDocument.value.artifact.artifact_id,
+        page_number: field.page_number,
+        locator: field.locator,
+        raw_value: field.raw_text,
+      })
+    }
+  }
+  return confirmations
+}
+
+async function applySelectedEvidence() {
+  if (!task.value || !draftForm.value || !canEditDraft.value || isDirty.value || applyingEvidence.value) return
+  const confirmations = selectedFileConfirmations()
+  if (!confirmations.length) return
+  const updated = structuredClone(draftForm.value)
+  for (const [index, field] of activeDocument.value!.result!.fields.entries()) {
+    if (evidenceSelections.value[field.field] !== evidenceFieldId(field, index)) continue
+    const mappings = field.field === 'quantity' && field.unit
+      ? [{ path: 'items[0].quantity', value: normalizeEvidenceValue(field) }, { path: 'items[0].unit', value: field.unit }]
+      : [{ path: fieldPathForEvidence(field)!, value: normalizeEvidenceValue(field) }]
+    if (!updated.items.length && mappings.some(mapping => mapping.path.startsWith('items['))) {
+      updated.items.push({ material_id: null, raw_name: null, specification: null, quantity: null, unit: null, unit_price: null })
+    }
+    for (const mapping of mappings) {
+      if (mapping.path === 'delivery_date') updated.delivery_date = mapping.value
+      else if (mapping.path === 'address') updated.address = mapping.value
+      else if (mapping.path === 'contact') updated.contact = mapping.value
+      else {
+        const match = mapping.path.match(/^items\[0\]\.(.+)$/)
+        if (match) updated.items[0][match[1] as keyof typeof updated.items[number]] = mapping.value as never
+      }
+    }
+  }
+  applyingEvidence.value = true
+  saving.value = true
+  errorMessage.value = ''
+  draftForm.value = updated
+  try {
+    await tasksApi.patchDraft(task.value, cleanCandidate(updated), confirmations)
+    savedForm.value = JSON.stringify(editableCandidate(updated))
+    keepLocalDraft.value = false
+    evidenceSelections.value = {}
+    noticeMessage.value = '字段确认已记录，系统正在重新校验；草稿内容变化时会生成新版本，该版本仍需人工审批。'
+    await refreshSnapshot()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '应用确认字段失败。'
+    if ((error as { status?: number }).status === 409) {
+      keepLocalDraft.value = true
+      await refreshSnapshot()
+    }
+  } finally {
+    saving.value = false
+    applyingEvidence.value = false
+  }
+}
 
 async function loadRecentTasks() {
   loading.value = true
@@ -312,8 +588,9 @@ async function createTask() {
   sending.value = true
   errorMessage.value = ''
   try {
-    const created = await tasksApi.create(orderType.value, text)
+    const created = await tasksApi.create(orderType.value, text, pendingDocumentIds.value)
     newTaskText.value = ''
+    pendingDocumentIds.value = []
     await router.push({ name: 'task-workbench', params: { taskId: created.task_id } })
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '任务创建失败。'
@@ -554,9 +831,36 @@ async function openTask(taskId: string) {
         <button type="button" :class="{ selected: orderType === 'SALES' }" @click="orderType = 'SALES'"><AppIcon name="file" :size="17" />销售订单</button>
         <button type="button" :class="{ selected: orderType === 'PURCHASE' }" @click="orderType = 'PURCHASE'"><AppIcon name="grid" :size="17" />采购订单</button>
       </div>
-      <label class="sr-only" for="task-description">订单需求描述</label>
+      <div class="multimodal-tabs" role="tablist" aria-label="输入方式">
+        <button type="button" role="tab" :aria-selected="inputMode === 'text'" :class="{ selected: inputMode === 'text' }" @click="inputMode = 'text'">文本描述</button>
+        <button type="button" role="tab" :aria-selected="inputMode === 'document'" :class="{ selected: inputMode === 'document' }" @click="inputMode = 'document'">PDF / 图片</button>
+        <button type="button" role="tab" :aria-selected="inputMode === 'excel'" :class="{ selected: inputMode === 'excel' }" @click="inputMode = 'excel'">Excel 批量导入</button>
+      </div>
+      <label for="task-description" class="multimodal-description-label">订单需求描述（必填）</label>
       <textarea id="task-description" v-model="newTaskText" class="task-composer__input" maxlength="12000" placeholder="例如：根据本部门有效合同，为某项目采购 20 吨指定规格的钢材，交期为……" @keydown.ctrl.enter="createTask" @keydown.meta.enter="createTask" />
-      <div class="task-composer__footer"><span>Ctrl / ⌘ + Enter 提交 · 身份和部门范围由登录会话确定</span><button class="primary-button" type="button" :disabled="sending || !newTaskText.trim()" @click="createTask"><AppIcon v-if="!sending" name="arrow" :size="17" />{{ sending ? '正在创建任务…' : '开始解析' }}</button></div>
+      <div v-if="inputMode !== 'text'" class="multimodal-panel">
+        <div class="multimodal-drop" @dragover.prevent @drop="onFileDrop">
+          <strong>{{ inputMode === 'excel' ? '导入订单 Excel' : '上传合同 PDF 或单据图片' }}</strong>
+          <span>{{ inputMode === 'excel' ? '仅支持 .xlsx，最大 10 MB' : 'PDF 最大 20 MB；PNG / JPG 最大 10 MB' }}</span>
+          <input ref="fileInput" class="sr-only" type="file" :accept="inputMode === 'excel' ? '.xlsx' : '.pdf,.png,.jpg,.jpeg'" @change="onFileChange" />
+          <button class="secondary-button" type="button" :disabled="fileBusy" @click="fileInput?.click()">{{ fileBusy ? (inputMode === 'excel' ? '正在校验…' : '正在上传 / 解析…') : '选择文件或拖到此处' }}</button>
+          <small v-if="inputMode === 'document'">文件只上传一次；切换面板不会重复上传。字段仍需你确认后才会写入草稿。</small>
+          <small v-else>{{ excelStatus }}</small>
+        </div>
+        <div v-if="inputMode === 'document' && documents.filter(item => pendingDocumentIds.includes(item.artifact.artifact_id)).length" class="multimodal-file-list">
+          <button v-for="item in documents.filter(entry => pendingDocumentIds.includes(entry.artifact.artifact_id))" :key="item.artifact.artifact_id" type="button" :class="{ selected: activeArtifactId === item.artifact.artifact_id }" @click="activeArtifactId = item.artifact.artifact_id">
+            <strong>{{ item.artifact.original_name }}</strong><span>{{ item.status === 'parsing' ? '正在真实解析…' : item.status === 'parsed' ? `解析完成 · ${item.result?.elapsed_ms ?? 0} ms` : item.message || '已上传' }}</span>
+          </button>
+        </div>
+        <button v-if="inputMode === 'document' && activeDocument?.status === 'failed'" class="text-button" type="button" @click="parseDocument(activeDocument, true)">重试解析（不重新上传）</button>
+        <div v-if="inputMode === 'excel' && excelPreview" class="excel-preview-summary">
+          <strong>分组校验结果</strong><span>{{ excelPreview.summary.sheet_count }} 个工作表 · {{ excelPreview.summary.detail_rows }} 行明细 · {{ excelPreview.summary.group_count }} 个订单组 · {{ excelPreview.summary.needs_correction_groups }} 组需修正</span>
+          <div v-for="group in excelPreview.groups" :key="group.group_id" class="excel-preview-group"><div><b>{{ group.group_id }}</b><span>{{ group.rows.length }} 行 · {{ group.status === 'READY_FOR_REVIEW' ? '待复核' : group.status === 'OVER_QUOTA_REVIEW' ? '超额待复核' : '需修正' }}<template v-if="group.total_amount"> · {{ formatMoney(group.total_amount) }}</template></span><small v-for="issue in group.issues" :key="`${issue.code}:${issue.locator.cell}`">{{ issue.locator.sheet }}!{{ issue.locator.cell ?? '行内字段' }}：{{ issue.message }}</small></div></div>
+          <small>当前为只读分组校验，不会创建订单或触发审批。</small>
+        </div>
+        <button v-if="inputMode === 'excel' && excelArtifactId && !excelPreview && !fileBusy" class="text-button" type="button" @click="retryExcelPreview">重试分组校验</button>
+      </div>
+      <div class="task-composer__footer"><span>Ctrl / ⌘ + Enter 提交 · 身份和部门范围由登录会话确定<template v-if="pendingDocumentIds.length"> · 已附 {{ pendingDocumentIds.length }} 个来源文件</template></span><button class="primary-button" type="button" :disabled="sending || !newTaskText.trim() || inputMode === 'excel'" @click="createTask"><AppIcon v-if="!sending" name="arrow" :size="17" />{{ sending ? '正在创建任务…' : inputMode === 'excel' ? '请先完成分组校验' : '开始解析' }}</button></div>
       <NoticeBanner v-if="errorMessage" tone="danger" :message="errorMessage" />
       <NoticeBanner v-if="noticeMessage" tone="info" :message="noticeMessage" />
     </section>
@@ -568,7 +872,7 @@ async function openTask(taskId: string) {
         <span class="recent-task-row__main"><strong>{{ item.order_type === 'SALES' ? '销售订单' : '采购订单' }} · {{ item.task_id.slice(0, 8) }}</strong><small>{{ formatTime(item.updated_at) }}<template v-if="item.draft_version"> · 草稿 v{{ item.draft_version }}</template></small></span>
         <StatusBadge :label="stateLabels[item.state]" :tone="item.state === 'COMPLETED' ? 'success' : ['FAILED','BLOCKED_RULE','REJECTED'].includes(item.state) ? 'danger' : ['WAITING_INPUT','WAITING_APPROVAL'].includes(item.state) ? 'warning' : 'info'" />
       </button>
-      <div class="recent-tasks__help"><strong>使用帮助</strong><p>补充信息会恢复原任务；草稿变更生成新版本并重新校验；只有审批人能决定待审批版本。</p><span>PDF 与 Excel 上传尚未接入，当前仅支持文本任务。</span></div>
+      <div class="recent-tasks__help"><strong>使用帮助</strong><p>PDF / 图片解析会保留页码来源，字段需逐项确认后应用；Excel 只读校验分组和单元格。草稿仍需业务校验与人工审批。</p></div>
     </aside>
   </div>
 
@@ -605,6 +909,45 @@ async function openTask(taskId: string) {
         </section>
 
         <section class="task-draft-column">
+          <article class="card evidence-card">
+            <div class="task-section-heading"><div><span class="section-kicker">来源可追溯</span><h2>文件证据与字段确认</h2></div><StatusBadge v-if="activeDocument?.result" :label="activeDocument.result.state === 'COMPLETE' ? '解析完成' : '部分解析'" :tone="activeDocument.result.state === 'COMPLETE' ? 'success' : 'warning'" /></div>
+            <div class="evidence-toolbar">
+              <div class="multimodal-file-list" v-if="taskArtifacts.length">
+                <button v-for="item in taskArtifacts" :key="item.artifact_id" type="button" :class="{ selected: activeArtifactId === item.artifact_id }" @click="inspectArtifact(item)"><strong>{{ item.original_name }}</strong><span>{{ (item.byte_size / 1024).toFixed(0) }} KB · {{ item.media_type }}</span></button>
+              </div>
+              <label v-if="canUploadTaskFile" class="evidence-upload-button">
+                <input ref="fileInput" class="sr-only" type="file" accept=".pdf,.png,.jpg,.jpeg" :disabled="fileBusy" @change="onFileChange" />
+                <span>{{ fileBusy ? '正在上传 / 解析…' : '＋ 添加 PDF / 图片' }}</span>
+              </label>
+              <span v-else-if="!taskArtifacts.length" class="evidence-empty">任务当前没有已授权附件。</span>
+            </div>
+            <NoticeBanner v-if="activeDocument?.message" tone="danger" :message="activeDocument.message" />
+            <div v-if="activeDocument" class="evidence-preview-layout">
+              <div class="evidence-source-preview">
+                <div class="evidence-preview-title"><strong>{{ activeDocument.artifact.original_name }}</strong><span>{{ activeDocument.result ? `第 ${activeEvidencePage} 页` : '原始文件' }}</span></div>
+                <iframe v-if="activeDocument.previewUrl && activeDocument.artifact.media_type === 'application/pdf'" :src="`${activeDocument.previewUrl}#page=${activeEvidencePage}`" :title="`原始文件 ${activeDocument.artifact.original_name}`" />
+                <img v-else-if="activeDocument.previewUrl" :src="activeDocument.previewUrl" :alt="`原始文件 ${activeDocument.artifact.original_name}`" />
+                <button v-else class="secondary-button" type="button" :disabled="activeDocument.status === 'parsing'" @click="inspectArtifact(activeDocument.artifact)">{{ activeDocument.status === 'parsing' ? '正在读取…' : '打开原始文件并解析' }}</button>
+              </div>
+              <div class="evidence-fields">
+                <template v-if="activeDocument.result">
+                  <label v-for="(field, index) in activeDocument.result.fields" :key="evidenceFieldId(field, index)" class="evidence-field" :class="{ 'evidence-field--conflict': field.status === 'CONFLICT' }">
+                    <input v-if="fieldPathForEvidence(field)" type="radio" :name="`${activeArtifactId}-${field.field}`" :value="evidenceFieldId(field, index)" :disabled="!canEditDraft || isDirty || applyingEvidence" v-model="evidenceSelections[field.field]" />
+                    <span class="evidence-field__body"><strong>{{ fieldLabelForEvidence(field.field) }}：{{ field.value }}<small v-if="field.unit"> {{ field.unit }}</small></strong><small>第 {{ field.page_number }} 页 · {{ field.status === 'CONFLICT' ? '存在冲突，需选择一项' : '待人工确认' }}</small><code>{{ field.raw_text }}</code></span>
+                    <span v-if="field.status === 'CONFLICT'" class="evidence-conflict-tag">冲突候选</span>
+                    <span v-if="!fieldPathForEvidence(field)" class="evidence-field__manual">需人工匹配</span>
+                  </label>
+                  <div v-if="activeDocument.result.missing_fields.length" class="evidence-missing"><strong>未识别字段</strong><span>{{ activeDocument.result.missing_fields.map(fieldLabelForEvidence).join('、') }}</span></div>
+                  <p v-if="!activeDocument.result.fields.length" class="evidence-empty">没有识别出可确认字段；原文件仍保留，可手工编辑草稿。</p>
+                </template>
+                <div v-else class="evidence-empty"><span>{{ activeDocument.status === 'parsing' ? '正在解析文件，请稍候…' : '选择附件以查看解析结果和页内来源。' }}</span><button v-if="activeDocument.status === 'failed'" class="text-button" type="button" @click="parseDocument(activeDocument, true)">重试解析</button></div>
+              </div>
+            </div>
+            <div v-if="activeDocument?.result" class="evidence-apply-row">
+              <span>已选择 {{ selectedEvidenceCount }} 个字段 · 确认后保存并重新校验，字段来源写入审计记录</span>
+              <button class="primary-button" type="button" :disabled="!canEditDraft || isDirty || !selectedEvidenceCount || applyingEvidence || saving" @click="applySelectedEvidence">{{ applyingEvidence ? '正在应用并校验…' : isDirty ? '请先保存当前草稿修改' : '确认并应用到草稿' }}</button>
+            </div>
+          </article>
           <article class="card draft-card">
             <div class="task-section-heading"><div><span class="section-kicker">订单预览</span><h2>草稿字段</h2></div><StatusBadge v-if="task.draft" :label="task.draft.validated ? '结构校验通过' : '需要补齐'" :tone="task.draft.validated ? 'success' : 'warning'" /></div>
             <template v-if="draftForm && task.draft">

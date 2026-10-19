@@ -300,9 +300,12 @@ def parse_pdf(path: Path, input_sha256: str) -> dict[str, Any]:
 
     if len(pages) != page_count:
         raise PdfParseError("FILE_UNREADABLE", "PDF 页面解析不完整")
-    fields, missing = _field_candidates(pages)
+    fields, missing = _field_candidates(
+        pages, include_conflicts=True, include_delivery_fields=True
+    )
+    has_conflict = any(field["status"] == "CONFLICT" for field in fields)
     return {
-        "state": "PARTIAL" if issues or missing else "COMPLETE",
+        "state": "PARTIAL" if issues or missing or has_conflict else "COMPLETE",
         "input_sha256": input_sha256,
         "page_count": page_count,
         "pages": pages,
