@@ -7,6 +7,7 @@ import LoginView from './views/LoginView.vue'
 import MasterDataView from './views/MasterDataView.vue'
 import OrderCenterView from './views/OrderCenterView.vue'
 import TaskWorkbenchView from './views/TaskWorkbenchView.vue'
+import { useTaskWorkspaceStore } from './stores/taskWorkspace'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -28,7 +29,7 @@ export const router = createRouter({
   ],
 })
 
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
   const auth = useAuthStore()
   // 路由跳转时重新询问服务端，避免客户端缓存身份掩盖已过期会话。
   await auth.loadIdentity(true)
@@ -39,6 +40,7 @@ router.beforeEach(async (to) => {
   }
 
   if (!auth.identity) {
+    useTaskWorkspaceStore().clearWorkspace()
     return {
       name: 'login',
       query: {
@@ -50,6 +52,10 @@ router.beforeEach(async (to) => {
 
   if (to.meta.requiresSystemAdmin && !auth.identity.roles.includes('system_admin')) {
     return { name: 'workbench' }
+  }
+
+  if (to.name === 'task-workbench' && from.name !== 'task-workbench') {
+    useTaskWorkspaceStore().returnPath = from.name === 'login' ? '/orders' : (from.fullPath || '/orders')
   }
 
   return true
