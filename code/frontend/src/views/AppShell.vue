@@ -22,6 +22,8 @@ const roleText = computed(() => identity.value?.roles.map((role) => roleLabels[r
 const userInitial = computed(() => identity.value?.login.slice(0, 1).toUpperCase() ?? 'U')
 const pageTitle = computed(() => {
   if (route.name === 'task-workbench') return '全屏工作台'
+  if (route.name === 'task-history') return '历史任务'
+  if (route.name === 'task-trace') return '任务执行轨迹'
   if (route.name === 'import-batch') return '批量校验与审批'
   if (route.name === 'order-center') return '订单中心'
   if (route.name === 'interface-states') return '界面状态与异常反馈'
@@ -33,7 +35,7 @@ const navigationItems = [
   { label: '智能提单', icon: 'sparkles', route: 'workbench' },
   { label: '订单中心', icon: 'file', route: 'order-center' },
   { label: '批量导入', icon: 'grid' },
-  { label: '任务追踪', icon: 'trace' },
+  { label: '任务追踪', icon: 'trace', route: 'task-history' },
   { label: '评测中心', icon: 'chart' },
   { label: '主数据与配置', icon: 'sliders', route: 'master-data', adminOnly: true },
 ]
@@ -60,7 +62,7 @@ async function logout() {
       <p class="side-navigation__caption">智能商贸提单助手</p>
       <nav class="main-nav">
         <template v-for="item in navigation" :key="item.label">
-          <RouterLink v-if="item.route" :to="{ name: item.route }" class="main-nav__link" :class="{ active: route.name === item.route }">
+          <RouterLink v-if="item.route" :to="{ name: item.route }" class="main-nav__link" :class="{ active: route.name === item.route || (item.route === 'task-history' && route.name === 'task-trace') }">
             <AppIcon :name="item.icon" :size="18" /><span>{{ item.label }}</span>
           </RouterLink>
           <button v-else type="button" class="main-nav__link main-nav__link--future" @click="unavailable(item.label)">
