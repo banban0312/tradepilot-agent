@@ -1,0 +1,49 @@
+{
+  "dataset_version": "1.0.0",
+  "master_data_version": "1.0.0",
+  "input_fixture_version": "1.0.0",
+  "timezone": "Asia/Hong_Kong",
+  "fixed_clock": "2026-10-16T09:00:00+08:00",
+  "case_count": 41,
+  "required_categories": [
+    "normal",
+    "abnormal",
+    "ambiguity",
+    "unauthorized",
+    "quota",
+    "duplicate_submission"
+  ],
+  "minimum_cases_per_category": 6,
+  "category_counts": {
+    "normal": 6,
+    "abnormal": 6,
+    "ambiguity": 6,
+    "unauthorized": 6,
+    "quota": 6,
+    "duplicate_submission": 6
+  },
+  "special_case_count": 5,
+  "special_requirements": {
+    "recovery": 2,
+    "concurrency": 2,
+    "unknown_commit_result": 1
+  },
+  "files": {
+    "mixed_batch": {
+      "path": "files/mixed_batch.xlsx",
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "sha256": "bf8b56b03cc3a5d0d27e9fa05fdcc564161f0d811197f233dd7f033c5b1de4f1",
+      "description": "合成评测输入，不含真实业务或个人信息。"
+    },
+    "damaged_pdf": {
+      "path": "files/damaged.pdf",
+      "media_type": "application/pdf",
+      "sha256": "00acbb4538ab6d3ed085dfe50310313ed6e8bf4b9ec808e8b35b3969cdb1a069",
+      "description": "合成评测输入，不含真实业务或个人信息。"
+    }
+  },
+  "execution_modes": {
+    "offline": "固定输入夹具；结果不得标记为在线模型成绩",
+    "online": "真实模型及外部服务执行，须单独记录配置与失败/跳过状态"
+  }
+}

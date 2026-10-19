@@ -1,0 +1,107 @@
+{
+  "version": "1.0.0",
+  "actors": {
+    "operator_north": {
+      "login": "demo-operator-north",
+      "role": "operator",
+      "department": "north"
+    },
+    "approver_north": {
+      "login": "demo-approver-north",
+      "role": "approver",
+      "department": "north"
+    },
+    "operator_south": {
+      "login": "demo-operator-south",
+      "role": "operator",
+      "department": "south"
+    },
+    "approver_south": {
+      "login": "demo-approver-south",
+      "role": "approver",
+      "department": "south"
+    },
+    "admin": {
+      "login": "demo-admin",
+      "role": "admin",
+      "department": "all"
+    }
+  },
+  "contracts": {
+    "sales_north_default": {
+      "number": "TP-DEMO-SALES-N1",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "valid_from": "2025-01-01",
+      "valid_to": "2030-12-31",
+      "total_amount": "150000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "3500.00",
+        "max_quantity": "100.000",
+        "occupied_amount": "0.00"
+      }
+    },
+    "sales_north_small_balance": {
+      "number": "TP-EVAL-SALES-NORTH-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "3500.00",
+        "unit": "吨"
+      }
+    },
+    "purchase_north_default": {
+      "number": "TP-DEMO-PURCHASE-N1",
+      "direction": "purchase",
+      "department": "north",
+      "status": "active",
+      "valid_from": "2025-01-01",
+      "valid_to": "2030-12-31",
+      "total_amount": "800000.00",
+      "line": {
+        "material_id": "MAT-31",
+        "price": "3550.00",
+        "max_quantity": "100.000"
+      }
+    },
+    "sales_south_no_price": {
+      "number": "TP-DEMO-SALES-S1",
+      "direction": "sales",
+      "department": "south",
+      "status": "active",
+      "line": {
+        "material_id": "MAT-32",
+        "price": null
+      }
+    },
+    "sales_north_inactive": {
+      "number": "TP-DEMO-SALES-INACTIVE",
+      "direction": "sales",
+      "department": "north",
+      "status": "inactive",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "3500.00"
+      }
+    }
+  },
+  "files": {
+    "mixed_batch": {
+      "path": "files/mixed_batch.xlsx",
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "sha256": "bf8b56b03cc3a5d0d27e9fa05fdcc564161f0d811197f233dd7f033c5b1de4f1",
+      "description": "合成评测输入，不含真实业务或个人信息。"
+    },
+    "damaged_pdf": {
+      "path": "files/damaged.pdf",
+      "media_type": "application/pdf",
+      "sha256": "00acbb4538ab6d3ed085dfe50310313ed6e8bf4b9ec808e8b35b3969cdb1a069",
+      "description": "合成评测输入，不含真实业务或个人信息。"
+    }
+  }
+}
