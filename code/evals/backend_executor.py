@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import sys
-import asyncio
 from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
@@ -24,7 +24,7 @@ if not _BACKEND_ROOT.is_dir():
 if _BACKEND_ROOT.is_dir() and str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-from evals.service import CaseSkipped  # noqa: E402 - backend path is registered above.
+from evals.service import CaseSkipped
 
 
 class BackendCaseExecutor:
@@ -147,12 +147,17 @@ class BackendCaseExecutor:
         duplicate_double_click_case = case.get(
             "id"
         ) == "duplicate-double-click" and actions == ["concurrent_commit"]
+        lost_commit_response_case = case.get("id") in {
+            "duplicate-lost-response",
+            "special-unknown-commit",
+        }
         if (
             not duplicate_replay_case
             and not stale_commit_case
             and not recovery_approval_case
             and not recovery_input_case
             and not duplicate_double_click_case
+            and not lost_commit_response_case
             and actions != ["attempt_approve"]
             and (not actions or actions[0] != "create_task")
         ):
@@ -449,6 +454,10 @@ class BackendCaseExecutor:
         duplicate_double_click_case = case.get(
             "id"
         ) == "duplicate-double-click" and actions == ["concurrent_commit"]
+        lost_commit_response_case = case.get("id") in {
+            "duplicate-lost-response",
+            "special-unknown-commit",
+        }
         from app.database import async_session_factory, engine
         from app.models import (
             AgentTask,
@@ -707,6 +716,15 @@ class BackendCaseExecutor:
                     worker=worker,
                     request_count=int(case["actions"][0].get("requests", 2)),
                 )
+            elif lost_commit_response_case:
+                await self._run_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"]
+                    if actor.get("department") != "all"
+                    else self.fixtures["actors"]["approver_north"],
+                    worker=worker,
+                )
             elif len(actions) > 1:
                 await self._run_approval_actions(
                     client=client,
@@ -734,7 +752,7 @@ class BackendCaseExecutor:
                 client.headers["X-CSRF-Token"] = owner_login.json()["data"][
                     "csrf_token"
                 ]
-            if duplicate_replay_case:
+            if duplicate_replay_case or lost_commit_response_case:
                 same_order_id_on_replay = await self._replay_approved_commit(
                     task_id=task_uuid,
                     async_session_factory=async_session_factory,

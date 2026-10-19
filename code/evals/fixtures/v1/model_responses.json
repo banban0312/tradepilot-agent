@@ -1307,6 +1307,12 @@
     "duplicate-same-key": {
       "extends": "normal-complete-sales"
     },
+    "duplicate-lost-response": {
+      "extends": "normal-complete-sales"
+    },
+    "special-unknown-commit": {
+      "extends": "normal-complete-sales"
+    },
     "unauthorized-old-approval": {
       "extends": "normal-complete-sales"
     },
