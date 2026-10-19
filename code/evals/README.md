@@ -84,3 +84,24 @@ uv run --frozen --project backend --directory code python -m pytest -q tests/iss
 - 参数校验统计以已进入实际 TOOL span 的请求计为通过，以 `function_calling.tool_argument_validation` RULE 错误 span 计为拒绝；没有相应 span 时不推测。
 - 字段评分只纳入固定数据集中标注的业务字段（或 `expected.field_labels` 显式指定项），如审批状态、重放次数等执行事实不混入字段提取准确率。
 - 预期值为 `null` 的抽取字段表示该等待态下字段本就未确认，故不纳入必评字段分母；预期非空但实际缺失仍计为遗漏并降低覆盖率。
+
+## 评测中心（M6-04）
+
+系统管理员可从“评测中心”启动 v1 固定数据集的离线或在线运行。API 在独立的 eval-db PostgreSQL 服务中为每次运行创建 tp_eval_<run UUID> 数据库，完成迁移和固定示例 seed 后，启动隔离 API 与 MCP；评测执行器按案例控制一次性 Worker，避免常驻 Worker 抢占并发案例。执行器验证隔离 API/数据库服务标识。评测结束时停止子进程并删除该运行数据库，保留报告供页面查询和下载。评测子进程只接收专用评测数据库凭据，不接收主业务数据库凭据。
+
+运行进度逐案例写入状态文件；运行中页面只显示进度，不显示最终成绩。结束后页面从同一份 summary.json、cases.jsonl 显示指标、分类和失败证据。失败项展开的是该隔离运行保存的任务/轨迹快照，不跳转到主业务数据库的任务轨迹。在线模式会使用后端进程配置的真实模型并可能产生费用；离线和在线运行始终分开标记。
+
+评测中心运行要求：
+
+- 后端在仓库 Compose 网络内运行，业务 PostgreSQL 与独立评测 PostgreSQL 服务名分别为 db、eval-db。
+- 主库使用 DATABASE_URL；评测服务使用独立的 EVALUATION_POSTGRES_DB、EVALUATION_POSTGRES_USER、EVALUATION_POSTGRES_PASSWORD 和 EVALUATION_DATABASE_ADMIN_URL。评测凭据不得复用主库密码。
+- API 服务挂载 evaluation_reports 持久卷。报告仅允许系统管理员查询和下载。
+- 页面只支持固定数据集版本 v1；不接受客户端路径、任意执行命令或自定义执行器。
+
+Issue #39 的本地验证入口：
+
+```powershell
+.\code\scripts\verify_issue_039.ps1
+```
+
+该入口运行后端授权/报告/进度测试、评测服务进度测试和前端类型/生产构建。实际隔离服务运行则从已启动的本机应用页面选择“运行评测”，默认离线；在线运行单独验证模型连通性与实际结果。

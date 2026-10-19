@@ -30,6 +30,7 @@ const pageTitle = computed(() => {
   if (route.name === 'master-data') return '主数据与配置'
   if (route.name === 'runtime-settings') return '运行参数与业务规则'
   if (route.name === 'audit-log') return '系统操作审计'
+  if (route.name === 'evaluation-center') return '评测中心'
   return '开始一笔新订单'
 })
 
@@ -38,7 +39,7 @@ const navigationItems = [
   { label: '订单中心', icon: 'file', route: 'order-center' },
   { label: '批量导入', icon: 'grid' },
   { label: '任务追踪', icon: 'trace', route: 'task-history' },
-  { label: '评测中心', icon: 'chart' },
+  { label: '评测中心', icon: 'chart', route: 'evaluation-center', adminOnly: true },
   { label: '主数据与配置', icon: 'sliders', route: 'master-data', adminOnly: true },
   { label: '运行参数与审计', icon: 'trace', route: 'runtime-settings', adminOnly: true },
 ]
