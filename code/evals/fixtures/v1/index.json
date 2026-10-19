@@ -88,6 +88,42 @@
         "material_id": "MAT-30",
         "price": "3500.00"
       }
+    },
+    "sales_north_over_cent": {
+      "number": "TP-EVAL-SALES-NORTH-CENT-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "10000.01",
+        "unit": "吨"
+      }
+    },
+    "sales_north_equal_balance": {
+      "number": "TP-EVAL-SALES-NORTH-EQUAL-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "5000.00",
+        "unit": "吨"
+      }
+    },
+    "sales_north_note_balance": {
+      "number": "TP-EVAL-SALES-NORTH-NOTE-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "3500.00",
+        "unit": "吨"
+      }
     }
   },
   "files": {

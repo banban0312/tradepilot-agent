@@ -372,6 +372,7 @@ class BackendCaseExecutor:
             "active_wait": task_data.get("active_wait"),
             "trace": {
                 "model_tool_names": _model_selected_tools(trace_rows),
+                "tool_summaries": _tool_result_summaries(trace_rows),
                 "trace_id": str(trace_rows[0].trace_id) if trace_rows else None,
                 "spans": trace_data.get("spans", []),
             },
@@ -668,6 +669,27 @@ def _model_selected_tools(trace_rows) -> list[str]:
             if isinstance(call, dict) and call.get("name") in allowed:
                 selected.append(call["name"])
     return selected
+
+
+def _tool_result_summaries(trace_rows) -> dict[str, dict]:
+    """导出追踪里已有的脱敏工具摘要，供评测断言业务统计结果。"""
+    allowed = {
+        "query_customer",
+        "match_material",
+        "get_contract",
+        "check_contract_balance",
+        "save_order_draft",
+    }
+    summaries = {}
+    for span in trace_rows:
+        output = span.output_ref
+        if span.kind != "TOOL" or not isinstance(output, dict):
+            continue
+        name = output.get("tool")
+        summary = output.get("result_summary")
+        if name in allowed and isinstance(summary, dict):
+            summaries[name] = summary
+    return summaries
 
 
 class FixtureModelClient:
