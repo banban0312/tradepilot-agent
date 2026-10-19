@@ -143,11 +143,20 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
         "restart_worker",
         "resume_task",
     ]
+    input_recovery_case = next(
+        case for case in cases if case["id"] == "special-recovery-waiting-input"
+    )
+    assert [action["kind"] for action in input_recovery_case["actions"]] == [
+        "restart_worker",
+        "resume_task",
+        "provide_input_once",
+    ]
     response_fixtures = json.loads(
         (root / "fixtures/v1/model_responses.json").read_text(encoding="utf-8")
     )
     assert "unauthorized-old-approval" in response_fixtures["cases"]
     assert "special-recovery-waiting-approval" in response_fixtures["cases"]
+    assert "special-recovery-waiting-input" in response_fixtures["cases"]
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")

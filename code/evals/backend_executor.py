@@ -130,9 +130,17 @@ class BackendCaseExecutor:
             "restart_worker",
             "resume_task",
         ]
+        recovery_input_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-input" and actions == [
+            "restart_worker",
+            "resume_task",
+            "provide_input_once",
+        ]
         if (
             not duplicate_replay_case
             and not recovery_approval_case
+            and not recovery_input_case
             and actions != ["attempt_approve"]
             and (not actions or actions[0] != "create_task")
         ):
@@ -180,6 +188,10 @@ class BackendCaseExecutor:
                         for call in round_calls:
                             if call.get("name") == "save_order_draft":
                                 call["arguments"]["expected_version"] = 2
+                elif recovery_input_case and fixture_runs > 0:
+                    selected_fixture = deepcopy(
+                        self.model_fixtures["cases"]["normal-complete-sales"]
+                    )
                 fixture_runs += 1
                 return FixtureModelClient(case_id=case["id"], fixture=selected_fixture)
 
@@ -408,6 +420,13 @@ class BackendCaseExecutor:
         ) == "special-recovery-waiting-approval" and actions == [
             "restart_worker",
             "resume_task",
+        ]
+        recovery_input_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-input" and actions == [
+            "restart_worker",
+            "resume_task",
+            "provide_input_once",
         ]
         from app.database import async_session_factory, engine
         from app.models import (
@@ -641,6 +660,10 @@ class BackendCaseExecutor:
                 )
             elif recovery_approval_case:
                 worker_restarted = await self._verify_waiting_approval_after_restart(
+                    client=client, task_id=task_id, worker=worker
+                )
+            elif recovery_input_case:
+                worker_restarted = await self._resume_waiting_input_after_restart(
                     client=client, task_id=task_id, worker=worker
                 )
             elif len(actions) > 1:
@@ -1118,6 +1141,48 @@ class BackendCaseExecutor:
             or active_wait.get("kind") != "APPROVAL"
         ):
             raise RuntimeError("重建 Worker 后审批等待点未能回查")
+        return True
+
+    async def _resume_waiting_input_after_restart(
+        self, *, client, task_id: str, worker
+    ) -> bool:
+        """重建 Worker 后读取输入等待点，接受一次补充并恢复同一任务。"""
+        from app.worker.queue import PersistentTaskWorker
+
+        restarted = PersistentTaskWorker(
+            engine=worker.engine,
+            session_factory=worker.session_factory,
+            handlers=worker.handlers,
+            worker_id=f"eval-restart-{uuid4().hex[:16]}",
+            poll_seconds=0.01,
+        )
+        await restarted.recover()
+        if await restarted.run_once():
+            raise RuntimeError("输入等待恢复案例不应存在可执行队列作业")
+        response = await client.get(f"/api/v1/tasks/{task_id}")
+        response.raise_for_status()
+        data = response.json()["data"]
+        active_wait = data.get("active_wait")
+        if (
+            data.get("state") != "WAITING_INPUT"
+            or not isinstance(active_wait, dict)
+            or active_wait.get("kind") != "INPUT"
+        ):
+            raise RuntimeError("重建 Worker 后输入等待点未能回查")
+        supplement = await client.post(
+            f"/api/v1/tasks/{task_id}/inputs",
+            headers={"Idempotency-Key": f"eval-recovery-input-{uuid4().hex}"},
+            json={
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+                "expected_draft_version": active_wait.get("draft_version"),
+                "text": "规格为 12mm。",
+                "artifact_ids": [],
+            },
+        )
+        supplement.raise_for_status()
+        if not await restarted.run_once():
+            raise RuntimeError("用户补充规格后新 Worker 未领取恢复作业")
         return True
 
     async def _seed_wrong_department_approver(
