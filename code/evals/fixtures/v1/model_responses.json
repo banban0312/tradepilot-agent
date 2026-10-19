@@ -1315,6 +1315,12 @@
     },
     "special-recovery-waiting-input": {
       "extends": "ambiguity-missing-spec"
+    },
+    "duplicate-double-click": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-commit-stale-approval": {
+      "extends": "normal-complete-sales"
     }
   }
 }

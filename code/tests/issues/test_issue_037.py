@@ -151,12 +151,25 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
         "resume_task",
         "provide_input_once",
     ]
+    duplicate_click_case = next(
+        case for case in cases if case["id"] == "duplicate-double-click"
+    )
+    assert duplicate_click_case["actions"][0]["requests"] == 2
+    stale_commit_case = next(
+        case for case in cases if case["id"] == "duplicate-commit-stale-approval"
+    )
+    assert [action["kind"] for action in stale_commit_case["actions"]] == [
+        "edit_draft",
+        "commit_old_approval",
+    ]
     response_fixtures = json.loads(
         (root / "fixtures/v1/model_responses.json").read_text(encoding="utf-8")
     )
     assert "unauthorized-old-approval" in response_fixtures["cases"]
     assert "special-recovery-waiting-approval" in response_fixtures["cases"]
     assert "special-recovery-waiting-input" in response_fixtures["cases"]
+    assert "duplicate-double-click" in response_fixtures["cases"]
+    assert "duplicate-commit-stale-approval" in response_fixtures["cases"]
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")
