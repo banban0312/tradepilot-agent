@@ -1,2 +1,4 @@
 # Preserve Pen design files exactly; review changes through the design tool.
 *.pen binary
+code/evals/fixtures/v1/files/*.pdf binary
+code/evals/fixtures/v1/files/*.xlsx binary
