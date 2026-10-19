@@ -770,6 +770,11 @@ async def load_batch(
             "running_count": sum(
                 state in {"STARTING", "RUNNING", "SUBMITTING"} for state in states
             ),
+            "waiting_input_count": sum(state == "WAITING_INPUT" for state in states),
+            "waiting_approval_count": sum(
+                state == "WAITING_APPROVAL" for state in states
+            ),
+            "result_check_count": sum(state == "SUBMITTING" for state in states),
             "completed_count": sum(state == "COMPLETED" for state in states),
             "stopped_count": sum(state == "STOPPED" for state in states),
             "needs_correction_count": sum(
@@ -778,9 +783,8 @@ async def load_batch(
             "over_quota_count": sum(
                 item.preview_status == "OVER_QUOTA_REVIEW" for item in items
             ),
-            "failed_count": sum(
-                state in {"FAILED", "REJECTED", "BLOCKED_RULE"} for state in states
-            ),
+            "blocked_count": sum(state == "BLOCKED_RULE" for state in states),
+            "failed_count": sum(state in {"FAILED", "REJECTED"} for state in states),
         },
         "groups": group_results,
     }

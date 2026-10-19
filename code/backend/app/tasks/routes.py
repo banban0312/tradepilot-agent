@@ -864,6 +864,50 @@ async def get_task(
     }
 
 
+@router.get("/{task_id}/trace/{span_id}")
+async def get_failed_task_span(
+    task_id: UUID,
+    span_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(get_current_identity)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    """返回任务内一个真实失败 span 的定位元数据，不暴露模型思维链或工具载荷。"""
+    await _visible_task(session, task_id, context)
+    span = await session.scalar(
+        select(TraceSpan).where(
+            TraceSpan.id == span_id,
+            TraceSpan.task_id == task_id,
+            TraceSpan.status.in_(("ERROR", "INTERRUPTED")),
+        )
+    )
+    if span is None:
+        raise _api_error(404, "RESOURCE_NOT_FOUND", "失败轨迹不存在")
+    failure = span.error if isinstance(span.error, dict) else {}
+    return {
+        "data": {
+            "span_id": str(span.id),
+            "trace_id": str(span.trace_id),
+            "task_id": str(task_id),
+            "parent_span_id": str(span.parent_span_id) if span.parent_span_id else None,
+            "name": span.name,
+            "kind": span.kind,
+            "attempt": span.attempt,
+            "execution_mode": span.execution_mode,
+            "protocol": span.protocol,
+            "status": span.status,
+            "start_at": span.start_at.isoformat(),
+            "end_at": span.end_at.isoformat() if span.end_at else None,
+            "duration_ms": span.duration_ms,
+            "error": {
+                "code": failure.get("code"),
+                "retryable": bool(failure.get("retryable")),
+            },
+        },
+        "request_id": request_id(request),
+    }
+
+
 @router.post("/{task_id}/retry", status_code=202)
 async def retry_failed_task(
     task_id: UUID,

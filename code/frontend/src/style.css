@@ -304,6 +304,9 @@ a { color: inherit; text-decoration: none; }
 .task-progress-bar p:last-child { margin: 0; color: var(--color-muted); font-size: 12px; }
 .task-progress-bar__right { display: flex; align-items: center; gap: 8px; }
 .task-progress-bar__right .secondary-button { min-height: 34px; padding: 0 10px; font-size: 11px; }
+.focused-failure-span { display: grid; gap: 6px; margin: -2px 0 16px; padding: 13px 16px; border: 1px solid #f0cdcd; border-radius: 7px; background: #fff8f8; color: #9d3333; font-size: 12px; }
+.focused-failure-span p { margin: 0; }
+.focused-failure-span span,.focused-failure-span code { overflow-wrap: anywhere; }
 .task-workbench-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, .92fr); align-items: start; gap: 16px; }
 .task-conversation { display: flex; min-height: min(690px, calc(100vh - 260px)); flex-direction: column; padding: 19px; }
 .task-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

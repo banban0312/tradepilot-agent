@@ -56,7 +56,7 @@ export type ImportBatch = {
   state: string
   stop_requested: boolean
   created_at: string
-  summary: { group_count: number; task_count: number; running_count: number; completed_count: number; stopped_count: number; needs_correction_count: number; over_quota_count: number; failed_count: number }
+  summary: { group_count: number; task_count: number; running_count: number; waiting_input_count: number; waiting_approval_count: number; result_check_count: number; completed_count: number; stopped_count: number; needs_correction_count: number; over_quota_count: number; blocked_count: number; failed_count: number }
   groups: ImportBatchGroup[]
 }
 

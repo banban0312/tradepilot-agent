@@ -7,7 +7,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { useAuthStore } from '../stores/auth'
 import { artifactsApi, type Artifact, type ParseResult, type ParsedField } from '../services/artifacts'
 import { importsApi, type ImportPreview } from '../services/imports'
-import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type FileFieldConfirmation, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
+import { tasksApi, TASK_EVENT_TYPES, type DraftCandidate, type FailedTaskSpan, type FileFieldConfirmation, type MaterialCandidate, type MaterialMatchResult, type OrderType, type TaskSnapshot, type TaskState, type TaskSummary } from '../services/tasks'
 
 type WorkEvent = { type: string; seq: number; emitted_at: string; data: Record<string, unknown> }
 type InputMode = 'text' | 'document' | 'excel'
@@ -45,6 +45,9 @@ const matchingItems = ref(new Set<number>())
 const materialDecisions = ref(new Set<string>())
 const savedForm = ref('')
 const activity = ref<WorkEvent[]>([])
+const focusedFailureSpan = ref<FailedTaskSpan | null>(null)
+const focusedFailureError = ref('')
+const loadingFailureSpan = ref(false)
 const loading = ref(false)
 const sending = ref(false)
 const creatingBatch = ref(false)
@@ -57,6 +60,7 @@ const reviewReason = ref('')
 const keepLocalDraft = ref(false)
 let eventSource: EventSource | null = null
 let taskGeneration = 0
+let failureSpanGeneration = 0
 
 const pageMode = computed(() => typeof route.params.taskId === 'string' ? 'task' : 'home')
 const isDirty = computed(() => Boolean(draftForm.value && JSON.stringify(editableCandidate(draftForm.value)) !== savedForm.value))
@@ -242,6 +246,26 @@ async function refreshSnapshot(generation = taskGeneration) {
   }
 }
 
+async function loadFocusedFailureSpan() {
+  const generation = ++failureSpanGeneration
+  const taskId = route.params.taskId
+  const spanId = route.query.failed_span_id
+  focusedFailureSpan.value = null
+  focusedFailureError.value = ''
+  if (typeof taskId !== 'string' || typeof spanId !== 'string') return
+  loadingFailureSpan.value = true
+  try {
+    const span = await tasksApi.getFailedSpan(taskId, spanId)
+    if (generation === failureSpanGeneration) focusedFailureSpan.value = span
+  } catch (caught) {
+    if (generation === failureSpanGeneration) {
+      focusedFailureError.value = caught instanceof Error ? caught.message : '无法读取该失败轨迹。'
+    }
+  } finally {
+    if (generation === failureSpanGeneration) loadingFailureSpan.value = false
+  }
+}
+
 function openCreatedOrder() {
   const orderId = task.value?.order_ref?.order_id
   if (!orderId) return
@@ -319,6 +343,10 @@ watch(() => route.params.taskId, (value) => {
     pendingDocumentIds.value = []
     errorMessage.value = ''
   }
+}, { immediate: true })
+
+watch([() => route.params.taskId, () => route.query.failed_span_id], () => {
+  void loadFocusedFailureSpan()
 }, { immediate: true })
 
 watch(() => task.value?.draft?.version, async (version, previous) => {
@@ -901,6 +929,11 @@ async function openTask(taskId: string) {
         <div class="task-progress-bar__right"><StatusBadge :label="stateLabels[task.state]" :tone="stateTone" /><button class="secondary-button" type="button" @click="refreshSnapshot()"><AppIcon name="refresh" :size="16" />刷新</button><RouterLink class="secondary-button" :to="{ name: 'workbench' }"><AppIcon name="plus" :size="16" />新任务</RouterLink></div>
       </section>
       <NoticeBanner v-if="task.last_error" tone="danger" :message="typeof task.last_error.message === 'string' ? task.last_error.message : typeof task.last_error.code === 'string' ? `处理失败：${task.last_error.code}` : '任务处理失败，请查看运行轨迹并刷新。'" />
+      <section v-if="loadingFailureSpan || focusedFailureSpan || focusedFailureError" class="focused-failure-span" aria-live="polite">
+        <strong>{{ loadingFailureSpan ? '正在读取真实失败轨迹…' : focusedFailureSpan ? `失败位置：${focusedFailureSpan.name}` : '失败轨迹不可用' }}</strong>
+        <p v-if="focusedFailureError">{{ focusedFailureError }}</p>
+        <template v-if="focusedFailureSpan"><span>{{ focusedFailureSpan.kind }} · {{ focusedFailureSpan.status }} · 第 {{ focusedFailureSpan.attempt }} 次 · {{ focusedFailureSpan.duration_ms === null ? '耗时不可用' : `${focusedFailureSpan.duration_ms} ms` }}</span><span>错误码 {{ focusedFailureSpan.error.code ?? '未知' }} · {{ focusedFailureSpan.error.retryable ? '服务端允许安全重试' : '不可重试' }}</span><code>Span {{ focusedFailureSpan.span_id }} · Trace {{ focusedFailureSpan.trace_id }}</code></template>
+      </section>
       <NoticeBanner v-if="task.state === 'WAITING_INPUT' && missingLabels.length" tone="warning" :message="`还需要补充：${missingLabels.join('、')}`" />
       <NoticeBanner v-if="task.state === 'BLOCKED_RULE' && draftIssues.length" tone="danger" :message="draftIssues.map(issue => issue.message).join('；')" />
       <NoticeBanner v-if="keepLocalDraft" tone="warning" message="服务端草稿版本已变化。本页保留了你尚未保存的修改，没有覆盖它们；请检查最新错误和当前等待状态。" />
