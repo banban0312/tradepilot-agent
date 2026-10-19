@@ -44,10 +44,11 @@
 - `abnormal-mcp-unavailable` 仅将评测 Worker 的 MCP 地址指向隔离容器内未监听端口，以真实连接失败检查错误码与无订单副作用。
 - `unauthorized-wrong-approver` 在隔离数据库临时创建南区审批身份，尝试审批北区任务；验证 API 以 `404 RESOURCE_NOT_FOUND` 隐藏跨部门任务，并由原经办人回查等待状态及零订单、零审批、零占额事实。专用身份只存在于本次隔离数据库。
 - `unauthorized-old-approval` 先持久化授权审批，再由经办人编辑排队中的草稿；验证旧审批记录失效、原幂等键重放返回 `409 IDEMPOTENCY_CONFLICT`，并由真实 Worker 恢复到新版本的审批等待点；不生成订单或额度占用。
+- `special-recovery-waiting-approval` 让真实 Worker 将任务推进到审批等待点，再以新 Worker 实例恢复队列；确认无残留作业被误领，API 仍能回查原审批等待点，且不写订单、审批或额度占用。
 - `normal-excel-row` 与 `ambiguity-excel-row` 使用固定 XLSX 夹具走真实附件上传和订单导入预览 API，断言正常组、缺项组和超额组状态及原始行号；预览不会伪装成 Agent 任务或模型调用，也不会创建订单、审批和额度占用。
 - `abnormal-damaged-pdf` 将固定损坏 PDF 上传至真实附件 API，断言上传校验返回 `FILE_UNREADABLE`，附件未落库且没有业务订单副作用。
 - `duplicate-same-key` 先由经办人创建草稿、授权审批人批准并由 Worker 提交，再在隔离事务中重放同一持久审批命令；核对提交函数返回原订单 ID，且数据库中订单和合同占额没有重复增加。当前服务的订单提交是 Worker 内部事务，不存在公开的订单提交 HTTP 端点；本项覆盖持久层幂等回放，不代表网络并发或响应丢失验证。
-- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-multiple-lines`、`normal-excel-row`、`normal-approved-order`、`abnormal-damaged-pdf`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`abnormal-mcp-unavailable`、`ambiguity-missing-spec`、`ambiguity-material-alias`、`ambiguity-missing-date`、`ambiguity-missing-price`、`ambiguity-similar-customer`、`ambiguity-excel-row`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`、`unauthorized-direct-commit`、`unauthorized-wrong-approver`、`unauthorized-old-approval`、`duplicate-same-key`、`quota-over`、`quota-equal`、`quota-over-by-cent`、`quota-inactive-contract`、`quota-purchase-isolated`、`quota-note-no-bypass`。其余固定案例仍须逐步补齐执行路径与证据。
+- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-multiple-lines`、`normal-excel-row`、`normal-approved-order`、`abnormal-damaged-pdf`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`abnormal-mcp-unavailable`、`ambiguity-missing-spec`、`ambiguity-material-alias`、`ambiguity-missing-date`、`ambiguity-missing-price`、`ambiguity-similar-customer`、`ambiguity-excel-row`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`、`unauthorized-direct-commit`、`unauthorized-wrong-approver`、`unauthorized-old-approval`、`special-recovery-waiting-approval`、`duplicate-same-key`、`quota-over`、`quota-equal`、`quota-over-by-cent`、`quota-inactive-contract`、`quota-purchase-isolated`、`quota-note-no-bypass`。其余固定案例仍须逐步补齐执行路径与证据。
 
 ## 本地测试
 

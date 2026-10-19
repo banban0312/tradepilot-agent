@@ -1309,6 +1309,9 @@
     },
     "unauthorized-old-approval": {
       "extends": "normal-complete-sales"
+    },
+    "special-recovery-waiting-approval": {
+      "extends": "normal-complete-sales"
     }
   }
 }

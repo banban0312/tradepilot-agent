@@ -124,8 +124,15 @@ class BackendCaseExecutor:
             "edit_draft",
             "replay_stale_approval",
         ]
+        recovery_approval_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-approval" and actions == [
+            "restart_worker",
+            "resume_task",
+        ]
         if (
             not duplicate_replay_case
+            and not recovery_approval_case
             and actions != ["attempt_approve"]
             and (not actions or actions[0] != "create_task")
         ):
@@ -396,6 +403,12 @@ class BackendCaseExecutor:
             "edit_draft",
             "replay_stale_approval",
         ]
+        recovery_approval_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-approval" and actions == [
+            "restart_worker",
+            "resume_task",
+        ]
         from app.database import async_session_factory, engine
         from app.models import (
             AgentTask,
@@ -444,6 +457,7 @@ class BackendCaseExecutor:
         action_error_code = None
         action_status_code = None
         same_order_id_on_replay = None
+        worker_restarted = False
         async with httpx.AsyncClient(
             base_url=self.api_url,
             timeout=httpx.Timeout(self.settings.model_timeout_seconds + 30),
@@ -625,6 +639,10 @@ class BackendCaseExecutor:
                     actions=case["actions"],
                     worker=worker,
                 )
+            elif recovery_approval_case:
+                worker_restarted = await self._verify_waiting_approval_after_restart(
+                    client=client, task_id=task_id, worker=worker
+                )
             elif len(actions) > 1:
                 await self._run_approval_actions(
                     client=client,
@@ -771,6 +789,7 @@ class BackendCaseExecutor:
                 "error_code": action_error_code,
                 "status_code": action_status_code,
             },
+            "recovery": {"worker_restarted": worker_restarted},
             "draft": {
                 "fields": draft_fields,
                 "issues": (task_data.get("draft") or {}).get("issues", []),
@@ -1072,6 +1091,34 @@ class BackendCaseExecutor:
         if not await worker.run_once():
             raise RuntimeError("编辑草稿后隔离 Worker 未领取新输入作业")
         return error_code, replay.status_code
+
+    async def _verify_waiting_approval_after_restart(
+        self, *, client, task_id: str, worker
+    ) -> bool:
+        """以新 Worker 实例确认持久化审批等待点可回查且没有残留作业。"""
+        from app.worker.queue import PersistentTaskWorker
+
+        restarted = PersistentTaskWorker(
+            engine=worker.engine,
+            session_factory=worker.session_factory,
+            handlers=worker.handlers,
+            worker_id=f"eval-restart-{uuid4().hex[:16]}",
+            poll_seconds=0.01,
+        )
+        await restarted.recover()
+        if await restarted.run_once():
+            raise RuntimeError("审批等待恢复案例不应存在可执行队列作业")
+        response = await client.get(f"/api/v1/tasks/{task_id}")
+        response.raise_for_status()
+        data = response.json()["data"]
+        active_wait = data.get("active_wait")
+        if (
+            data.get("state") != "WAITING_APPROVAL"
+            or not isinstance(active_wait, dict)
+            or active_wait.get("kind") != "APPROVAL"
+        ):
+            raise RuntimeError("重建 Worker 后审批等待点未能回查")
+        return True
 
     async def _seed_wrong_department_approver(
         self,
