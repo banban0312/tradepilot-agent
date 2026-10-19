@@ -1303,6 +1303,9 @@
     },
     "unauthorized-wrong-approver": {
       "extends": "normal-complete-sales"
+    },
+    "duplicate-same-key": {
+      "extends": "normal-complete-sales"
     }
   }
 }

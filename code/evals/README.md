@@ -43,7 +43,8 @@
 - `normal-multiple-lines` 在隔离数据库创建两条真实合同明细，并断言各行物料、数量、单价及金额均正确。
 - `abnormal-mcp-unavailable` 仅将评测 Worker 的 MCP 地址指向隔离容器内未监听端口，以真实连接失败检查错误码与无订单副作用。
 - `unauthorized-wrong-approver` 在隔离数据库临时创建南区审批身份，尝试审批北区任务；验证 API 以 `404 RESOURCE_NOT_FOUND` 隐藏跨部门任务，并由原经办人回查等待状态及零订单、零审批、零占额事实。专用身份只存在于本次隔离数据库。
-- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-multiple-lines`、`normal-approved-order`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`abnormal-mcp-unavailable`、`ambiguity-missing-spec`、`ambiguity-material-alias`、`ambiguity-missing-date`、`ambiguity-missing-price`、`ambiguity-similar-customer`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`、`unauthorized-direct-commit`、`unauthorized-wrong-approver`、`quota-over`、`quota-equal`、`quota-over-by-cent`、`quota-inactive-contract`、`quota-purchase-isolated`、`quota-note-no-bypass`。其余固定案例仍须逐步补齐执行路径与证据。
+- `duplicate-same-key` 先由经办人创建草稿、授权审批人批准并由 Worker 提交，再在隔离事务中重放同一持久审批命令；核对提交函数返回原订单 ID，且数据库中订单和合同占额没有重复增加。当前服务的订单提交是 Worker 内部事务，不存在公开的订单提交 HTTP 端点；本项覆盖持久层幂等回放，不代表网络并发或响应丢失验证。
+- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-multiple-lines`、`normal-approved-order`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`abnormal-mcp-unavailable`、`ambiguity-missing-spec`、`ambiguity-material-alias`、`ambiguity-missing-date`、`ambiguity-missing-price`、`ambiguity-similar-customer`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`、`unauthorized-direct-commit`、`unauthorized-wrong-approver`、`duplicate-same-key`、`quota-over`、`quota-equal`、`quota-over-by-cent`、`quota-inactive-contract`、`quota-purchase-isolated`、`quota-note-no-bypass`。其余固定案例仍须逐步补齐执行路径与证据。
 
 ## 本地测试
 

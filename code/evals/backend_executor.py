@@ -104,13 +104,26 @@ class BackendCaseExecutor:
         if mode != self.mode:
             raise ValueError("评测执行器模式与服务模式不一致")
         actions = [action.get("kind") for action in case.get("actions", [])]
-        if actions != ["attempt_approve"] and (
-            not actions or actions[0] != "create_task"
+        duplicate_replay_case = case.get("id") == "duplicate-same-key" and actions == [
+            "create_task",
+            "human_approve_current_version",
+            "commit_once",
+            "replay_same_approved_command",
+        ]
+        if (
+            not duplicate_replay_case
+            and actions != ["attempt_approve"]
+            and (not actions or actions[0] != "create_task")
         ):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
-        if actions[0] == "create_task" and actions[1:] not in (
-            [],
-            ["human_approve_current_version", "commit_once"],
+        if (
+            actions[0] == "create_task"
+            and actions[1:]
+            not in (
+                [],
+                ["human_approve_current_version", "commit_once"],
+            )
+            and not duplicate_replay_case
         ):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
         if case.get("input", {}).get("kind") != "text":
@@ -145,6 +158,12 @@ class BackendCaseExecutor:
         self, case: dict, *, model_client_factory, model_execution_mode: str
     ) -> dict:
         actions = [action.get("kind") for action in case.get("actions", [])]
+        duplicate_replay_case = case.get("id") == "duplicate-same-key" and actions == [
+            "create_task",
+            "human_approve_current_version",
+            "commit_once",
+            "replay_same_approved_command",
+        ]
         from app.database import async_session_factory, engine
         from app.models import (
             AgentTask,
@@ -192,6 +211,7 @@ class BackendCaseExecutor:
         headers = {"Origin": self.settings.app_origin or "http://localhost"}
         action_error_code = None
         action_status_code = None
+        same_order_id_on_replay = None
         async with httpx.AsyncClient(
             base_url=self.api_url,
             timeout=httpx.Timeout(self.settings.model_timeout_seconds + 30),
@@ -389,6 +409,11 @@ class BackendCaseExecutor:
                 client.headers["X-CSRF-Token"] = owner_login.json()["data"][
                     "csrf_token"
                 ]
+            if duplicate_replay_case:
+                same_order_id_on_replay = await self._replay_approved_commit(
+                    task_id=task_uuid,
+                    async_session_factory=async_session_factory,
+                )
 
             task_response = await client.get(f"/api/v1/tasks/{task_id}")
             task_response.raise_for_status()
@@ -485,6 +510,8 @@ class BackendCaseExecutor:
                 persisted_items=persisted_items,
                 evidence_rows=evidence_rows,
             )
+            if same_order_id_on_replay is not None:
+                draft_fields["same_order_id_on_replay"] = same_order_id_on_replay
 
         last_error = task_data.get("last_error")
         return {
@@ -515,6 +542,7 @@ class BackendCaseExecutor:
                 "approvals": approvals,
                 "approval_actor_is_distinct": bool(approval_rows)
                 and all(row.actor_id != task_owner_id for row in approval_rows),
+                "same_order_id_on_replay": same_order_id_on_replay,
                 "quota_occupations": occupations,
                 "occupied_amount_delta": f"{occupied_after - occupied_before:.2f}",
             },
@@ -740,6 +768,34 @@ class BackendCaseExecutor:
             )
             await session.flush()
         return {**actor, "login": login}
+
+    async def _replay_approved_commit(self, *, task_id, async_session_factory) -> bool:
+        """复用同一持久审批命令重试事务提交，确认只回放原订单和额度占用。"""
+        from app.models import Order, TaskApproval
+        from app.orders.commit import commit_approved_order
+
+        async with async_session_factory() as session, session.begin():
+            approval = await session.scalar(
+                select(TaskApproval)
+                .where(
+                    TaskApproval.task_id == task_id,
+                    TaskApproval.decision == "APPROVE",
+                )
+                .order_by(TaskApproval.created_at.desc(), TaskApproval.id.desc())
+            )
+            original_order_id = await session.scalar(
+                select(Order.id).where(Order.task_id == task_id)
+            )
+            if approval is None or original_order_id is None:
+                raise RuntimeError("幂等重放案例缺少已批准订单的持久事实")
+            result = await commit_approved_order(
+                session,
+                task_id=task_id,
+                command_id=approval.command_id,
+                approval_id=approval.id,
+                config=self.settings,
+            )
+            return result.replayed and result.order_id == original_order_id
 
     async def _attempt_review_as(self, *, client, task_id, approver) -> tuple[str, int]:
         """记录越权审批 API 的真实拒绝；不会伪造任务终态或审批记录。"""
