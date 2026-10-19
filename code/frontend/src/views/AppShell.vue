@@ -28,6 +28,8 @@ const pageTitle = computed(() => {
   if (route.name === 'order-center') return '订单中心'
   if (route.name === 'interface-states') return '界面状态与异常反馈'
   if (route.name === 'master-data') return '主数据与配置'
+  if (route.name === 'runtime-settings') return '运行参数与业务规则'
+  if (route.name === 'audit-log') return '系统操作审计'
   return '开始一笔新订单'
 })
 
@@ -38,6 +40,7 @@ const navigationItems = [
   { label: '任务追踪', icon: 'trace', route: 'task-history' },
   { label: '评测中心', icon: 'chart' },
   { label: '主数据与配置', icon: 'sliders', route: 'master-data', adminOnly: true },
+  { label: '运行参数与审计', icon: 'trace', route: 'runtime-settings', adminOnly: true },
 ]
 const navigation = computed(() => navigationItems.filter((item) => !('adminOnly' in item) || identity.value?.roles.includes('system_admin')))
 
@@ -62,7 +65,7 @@ async function logout() {
       <p class="side-navigation__caption">智能商贸提单助手</p>
       <nav class="main-nav">
         <template v-for="item in navigation" :key="item.label">
-          <RouterLink v-if="item.route" :to="{ name: item.route }" class="main-nav__link" :class="{ active: route.name === item.route || (item.route === 'task-history' && route.name === 'task-trace') }">
+          <RouterLink v-if="item.route" :to="{ name: item.route }" class="main-nav__link" :class="{ active: route.name === item.route || (item.route === 'task-history' && route.name === 'task-trace') || (item.route === 'runtime-settings' && route.name === 'audit-log') }">
             <AppIcon :name="item.icon" :size="18" /><span>{{ item.label }}</span>
           </RouterLink>
           <button v-else type="button" class="main-nav__link main-nav__link--future" @click="unavailable(item.label)">
