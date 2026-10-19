@@ -152,7 +152,72 @@ export type TaskSummary = {
   status_url: string
 }
 
-export type TaskList = { items: TaskSummary[]; next_cursor: string | null }
+export type TaskBatchTree = {
+  batch_id: string
+  created_at: string
+  state: string
+  groups: Array<{
+    group_id: string
+    sheet_name: string
+    source_rows: number[]
+    preview_status: string
+    stop_result: string | null
+    task_id: string | null
+    task_state: string | null
+  }>
+}
+export type TaskList = { items: TaskSummary[]; next_cursor: string | null; batches: TaskBatchTree[] }
+export type TaskHistoryFilters = {
+  state?: TaskState | ''
+  input_type?: 'TEXT' | 'TEXT_AND_FILES' | 'EXCEL_GROUP' | ''
+  order_type?: OrderType | ''
+  q?: string
+  created_after?: string
+  created_before?: string
+}
+export type TaskTraceSpan = {
+  span_id: string
+  trace_id: string
+  parent_span_id: string | null
+  kind: string
+  name: string
+  attempt: number
+  execution_mode: string
+  protocol: string | null
+  status: string
+  start_at: string
+  end_at: string | null
+  duration_ms: number | null
+  input: Record<string, unknown> | null
+  output: Record<string, unknown> | null
+  usage: { input_tokens: number; output_tokens: number; total_tokens: number } | null
+  usage_status: 'available' | 'unavailable'
+  error: { code: string | null; retryable: boolean }
+  event_seq: number | null
+}
+export type TaskTrace = {
+  task_id: string
+  state: TaskState
+  spans: TaskTraceSpan[]
+  next_cursor: string | null
+  metrics: {
+    model_calls: number
+    usage_available_calls: number
+    usage_coverage: number | null
+    usage_status: 'available' | 'unavailable'
+    tokens: { input_tokens: number; output_tokens: number; total_tokens: number } | null
+    model_duration_ms: number
+    tool_duration_ms: number
+    manual_waits: Array<{ state: string | null; start_at: string; end_at: string | null; duration_ms: number; active: boolean }>
+  }
+  approvals: Array<{ approval_id: string; actor_id: string; decision: string; version: number; content_hash: string; invalidated: boolean; created_at: string }>
+  checkpoints: Array<{ checkpoint_id: string; interrupt_id: string; kind: string; draft_version: number | null; active: boolean; created_at: string }>
+  audit_events: Array<{ action: string; result: string; actor_id: string | null; created_at: string; object_ref: Record<string, unknown> }>
+  audit_events_truncated: boolean
+  order: null | { order_id: string; order_number: string; state: string }
+  events: Array<{ seq: number; type: string; span_id: string | null; payload: Record<string, unknown>; emitted_at: string }>
+  events_truncated: boolean
+}
 type ApiEnvelope<T> = { data: T; error?: { code?: string; message?: string }; detail?: { code?: string; message?: string } }
 
 function requestId() {
@@ -193,8 +258,20 @@ async function request<T>(path: string, init: RequestInit = {}, idempotencyKey?:
 }
 
 export const tasksApi = {
-  list: () => request<TaskList>('/api/v1/tasks?limit=20'),
+  list: (filters: TaskHistoryFilters = {}, cursor?: string | null, limit = 20) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    for (const [key, value] of Object.entries(filters)) {
+      if (value) params.set(key, value)
+    }
+    if (cursor) params.set('cursor', cursor)
+    return request<TaskList>(`/api/v1/tasks?${params.toString()}`)
+  },
   get: (taskId: string) => request<TaskSnapshot>(`/api/v1/tasks/${encodeURIComponent(taskId)}`),
+  getTrace: (taskId: string, cursor?: string | null, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (cursor) params.set('cursor', cursor)
+    return request<TaskTrace>(`/api/v1/tasks/${encodeURIComponent(taskId)}/trace?${params.toString()}`)
+  },
   getFailedSpan: (taskId: string, spanId: string) => request<FailedTaskSpan>(`/api/v1/tasks/${encodeURIComponent(taskId)}/trace/${encodeURIComponent(spanId)}`),
   retry: (task: TaskSnapshot) => {
     const spanId = task.last_error?.failed_span_id

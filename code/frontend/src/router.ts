@@ -7,6 +7,8 @@ import LoginView from './views/LoginView.vue'
 import MasterDataView from './views/MasterDataView.vue'
 import OrderCenterView from './views/OrderCenterView.vue'
 import TaskWorkbenchView from './views/TaskWorkbenchView.vue'
+import TaskHistoryView from './views/TaskHistoryView.vue'
+import TaskTraceView from './views/TaskTraceView.vue'
 import { useTaskWorkspaceStore } from './stores/taskWorkspace'
 
 export const router = createRouter({
@@ -18,6 +20,8 @@ export const router = createRouter({
       component: AppShell,
       children: [
         { path: '', name: 'workbench', component: TaskWorkbenchView },
+        { path: 'task-history', name: 'task-history', component: TaskHistoryView },
+        { path: 'tasks/:taskId/trace', name: 'task-trace', component: TaskTraceView },
         { path: 'tasks/:taskId', name: 'task-workbench', component: TaskWorkbenchView },
         { path: 'imports/:batchId', name: 'import-batch', component: ImportBatchView },
         { path: 'orders', name: 'order-center', component: OrderCenterView },
