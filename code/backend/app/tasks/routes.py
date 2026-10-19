@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import String, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import (
@@ -51,12 +51,17 @@ from app.models import (
     AuthSession,
     Contract,
     ContractBalance,
+    Customer,
     Department,
     Draft,
+    DraftRevision,
     FieldEvidence,
+    ImportBatch,
+    ImportBatchItem,
     InputArtifact,
     Material,
     Order,
+    Project,
     TaskApproval,
     TaskArtifact,
     TaskCommand,
@@ -593,6 +598,10 @@ async def list_tasks(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     state: str | None = Query(default=None),
     input_type: str | None = Query(default=None),
+    order_type: str | None = Query(default=None),
+    q: str | None = Query(default=None, min_length=1, max_length=120),
+    created_after: Annotated[datetime | None, Query()] = None,
+    created_before: Annotated[datetime | None, Query()] = None,
     cursor: str | None = Query(default=None, max_length=512),
     limit: int = Query(default=20, ge=1, le=MAX_PAGE_SIZE),
 ) -> dict[str, object]:
@@ -600,8 +609,21 @@ async def list_tasks(
         raise _api_error(403, "ACCESS_DENIED", "当前账号无权访问任务")
     if state is not None and state not in TASK_STATES:
         raise _api_error(422, "INPUT_INVALID", "任务状态筛选值无效")
-    if input_type is not None and input_type not in {"TEXT", "TEXT_AND_FILES"}:
+    if input_type is not None and input_type not in {
+        "TEXT",
+        "TEXT_AND_FILES",
+        "EXCEL_GROUP",
+    }:
         raise _api_error(422, "INPUT_INVALID", "任务输入类型筛选值无效")
+    if order_type is not None and order_type not in {"SALES", "PURCHASE"}:
+        raise _api_error(422, "INPUT_INVALID", "订单类型筛选值无效")
+    if any(
+        value is not None and value.tzinfo is None
+        for value in (created_after, created_before)
+    ):
+        raise _api_error(422, "INPUT_INVALID", "时间筛选必须包含时区")
+    if created_after and created_before and created_after > created_before:
+        raise _api_error(422, "INPUT_INVALID", "开始时间不能晚于结束时间")
     if not context.department_ids:
         return {
             "data": {"items": [], "next_cursor": None},
@@ -625,6 +647,55 @@ async def list_tasks(
         query = query.where(AgentTask.state == state)
     if input_type:
         query = query.where(start_input_type == input_type)
+    if order_type:
+        query = query.where(AgentTask.task_type == order_type)
+    if created_after:
+        query = query.where(AgentTask.created_at >= created_after)
+    if created_before:
+        query = query.where(AgentTask.created_at <= created_before)
+    if q:
+        pattern = f"%{q.strip()}%"
+        if pattern != "%%":
+            draft_search = (
+                select(DraftRevision.draft_id)
+                .join(Draft, Draft.id == DraftRevision.draft_id)
+                .outerjoin(Contract, Contract.id == DraftRevision.contract_id)
+                .outerjoin(Customer, Customer.id == DraftRevision.customer_id)
+                .outerjoin(Project, Project.id == DraftRevision.project_id)
+                .where(
+                    Draft.task_id == AgentTask.id,
+                    DraftRevision.version == Draft.current_version,
+                    or_(
+                        DraftRevision.contract_id.cast(String).ilike(pattern),
+                        DraftRevision.customer_id.cast(String).ilike(pattern),
+                        DraftRevision.project_id.cast(String).ilike(pattern),
+                        Contract.number.ilike(pattern),
+                        Customer.code.ilike(pattern),
+                        Customer.name.ilike(pattern),
+                        Project.code.ilike(pattern),
+                        Project.name.ilike(pattern),
+                    ),
+                    or_(
+                        Contract.department_id.in_(context.department_ids),
+                        Customer.department_id.in_(context.department_ids),
+                        Project.department_id.in_(context.department_ids),
+                    ),
+                )
+                .exists()
+            )
+            query = query.where(
+                or_(
+                    AgentTask.id.cast(String).ilike(pattern),
+                    TaskSession.title.ilike(pattern),
+                    draft_search,
+                    select(TaskCommand.id)
+                    .where(
+                        TaskCommand.task_id == AgentTask.id,
+                        TaskCommand.payload["text"].as_string().ilike(pattern),
+                    )
+                    .exists(),
+                )
+            )
     if cursor:
         created_at, task_id = _decode_cursor(cursor)
         query = query.where(
@@ -653,13 +724,113 @@ async def list_tasks(
         )
         for task, session_id, draft_version, task_input_type in rows
     ]
+    page_task_ids = [task.id for task, _, _, _ in rows]
+    batch_links = (
+        list(
+            (
+                await session.execute(
+                    select(ImportBatchItem).where(
+                        ImportBatchItem.task_id.in_(page_task_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if page_task_ids
+        else []
+    )
+    batch_ids = {link.batch_id for link in batch_links}
+    batch_by_task = {link.task_id: link for link in batch_links if link.task_id}
+    task_summary_by_id = {item["task_id"]: item for item in items}
+    for task_id, link in batch_by_task.items():
+        summary = task_summary_by_id.get(str(task_id))
+        if summary is not None:
+            summary["batch_id"] = str(link.batch_id)
+            summary["batch_group_id"] = link.group_id
+    batches: list[dict[str, object]] = []
+    if batch_ids:
+        batch_records = list(
+            (
+                await session.execute(
+                    select(ImportBatch).where(
+                        ImportBatch.id.in_(batch_ids),
+                        ImportBatch.department_id.in_(context.department_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        batch_items = list(
+            (
+                await session.execute(
+                    select(ImportBatchItem)
+                    .where(
+                        ImportBatchItem.batch_id.in_(batch_ids),
+                        or_(
+                            ImportBatchItem.task_id.is_(None),
+                            ImportBatchItem.task_id.in_(
+                                select(AgentTask.id).where(
+                                    AgentTask.department_id.in_(context.department_ids)
+                                )
+                            ),
+                        ),
+                    )
+                    .order_by(ImportBatchItem.created_at, ImportBatchItem.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        child_ids = [row.task_id for row in batch_items if row.task_id]
+        child_tasks = (
+            list(
+                (
+                    await session.execute(
+                        select(AgentTask.id, AgentTask.state).where(
+                            AgentTask.id.in_(child_ids),
+                            AgentTask.department_id.in_(context.department_ids),
+                        )
+                    )
+                ).all()
+            )
+            if child_ids
+            else []
+        )
+        child_state = {str(task_id): state for task_id, state in child_tasks}
+        batch_record_by_id = {record.id: record for record in batch_records}
+        batches = [
+            {
+                "batch_id": str(batch_id),
+                "created_at": batch_record_by_id[batch_id].created_at.isoformat(),
+                "state": batch_record_by_id[batch_id].state,
+                "groups": [
+                    {
+                        "group_id": row.group_id,
+                        "sheet_name": row.sheet_name,
+                        "source_rows": row.source_rows,
+                        "preview_status": row.preview_status,
+                        "stop_result": row.stop_result,
+                        "task_id": str(row.task_id) if row.task_id else None,
+                        "task_state": child_state.get(str(row.task_id))
+                        if row.task_id
+                        else None,
+                    }
+                    for row in batch_items
+                    if row.batch_id == batch_id
+                ],
+            }
+            for batch_id in batch_ids
+            if batch_id in batch_record_by_id
+        ]
     next_cursor = (
         _encode_cursor(rows[-1][0].created_at, rows[-1][0].id)
         if has_more and rows
         else None
     )
     return {
-        "data": {"items": items, "next_cursor": next_cursor},
+        "data": {"items": items, "next_cursor": next_cursor, "batches": batches},
         "request_id": request_id(request),
     }
 
@@ -903,6 +1074,392 @@ async def get_failed_task_span(
                 "code": failure.get("code"),
                 "retryable": bool(failure.get("retryable")),
             },
+        },
+        "request_id": request_id(request),
+    }
+
+
+def _trace_usage(usage: object) -> dict[str, int] | None:
+    """只把完整且非负的真实 usage 标为可用，缺失或损坏时保留 unavailable。"""
+    if not isinstance(usage, dict):
+        return None
+    values = [
+        usage.get(key) for key in ("input_tokens", "output_tokens", "total_tokens")
+    ]
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in values
+    ):
+        return None
+    return dict(
+        zip(("input_tokens", "output_tokens", "total_tokens"), values, strict=True)
+    )
+
+
+def _trace_code(value: object) -> str | None:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Z0-9_.-]{1,64}", value) is None:
+        return None
+    return value
+
+
+def _trace_ref(value: object) -> dict[str, object] | None:
+    """只返回轨迹写入器约定的结构化元数据，过滤正文、参数值和思维链。"""
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "provider",
+        "model",
+        "round",
+        "input_hash",
+        "tool_names",
+        "tool",
+        "response_id",
+        "attempts",
+        "output_text_length",
+        "tool_calls",
+        "call_id",
+        "name",
+        "argument_bytes",
+        "argument_fields",
+        "argument_types",
+        "result_fields",
+        "result_types",
+        "result_count",
+        "result_summary",
+        "response_fields",
+        "data_fields",
+        "candidates_count",
+        "lines_count",
+        "issue_count",
+        "source_ref_count",
+        "schema_version",
+        "protocol",
+        "checkpoint_id",
+        "interrupt_id",
+        "draft_version",
+        "order_id",
+        "order_number",
+        "approval_id",
+        "version",
+    }
+
+    def clean(item: object) -> object | None:
+        if isinstance(item, dict):
+            return {
+                key: cleaned
+                for key, nested in item.items()
+                if key in allowed and (cleaned := clean(nested)) is not None
+            }
+        if isinstance(item, list):
+            return [
+                cleaned for nested in item if (cleaned := clean(nested)) is not None
+            ][:100]
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            return item
+        return None
+
+    cleaned = clean(value)
+    return cleaned if isinstance(cleaned, dict) else None
+
+
+@router.get("/{task_id}/trace")
+async def get_task_trace(
+    task_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(get_current_identity)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    cursor: str | None = Query(default=None, max_length=512),
+    limit: int = Query(default=50, ge=1, le=MAX_PAGE_SIZE),
+) -> dict[str, object]:
+    """分页返回任务执行节点和关联事实，不暴露模型正文、密钥或原始工具载荷。"""
+    task = await _visible_task(session, task_id, context)
+    query = select(TraceSpan).where(TraceSpan.task_id == task.id)
+    if cursor:
+        created_at, span_id = _decode_cursor(cursor)
+        query = query.where(
+            or_(
+                TraceSpan.start_at > created_at,
+                and_(TraceSpan.start_at == created_at, TraceSpan.id > span_id),
+            )
+        )
+    page = list(
+        (
+            await session.execute(
+                query.order_by(TraceSpan.start_at, TraceSpan.id).limit(limit + 1)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    has_more = len(page) > limit
+    page = page[:limit]
+    all_spans = list(
+        (await session.execute(select(TraceSpan).where(TraceSpan.task_id == task.id)))
+        .scalars()
+        .all()
+    )
+    model_spans = [span for span in all_spans if span.kind == "MODEL"]
+    observed = [_trace_usage(span.usage) for span in model_spans]
+    usage_complete = bool(model_spans) and all(value is not None for value in observed)
+    usage_total = (
+        {
+            key: sum(value[key] for value in observed if value is not None)
+            for key in ("input_tokens", "output_tokens", "total_tokens")
+        }
+        if usage_complete
+        else None
+    )
+    events = list(
+        (
+            await session.execute(
+                select(TaskEvent)
+                .where(TaskEvent.task_id == task.id)
+                .order_by(TaskEvent.seq)
+                .limit(1000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    status_events = list(
+        (
+            await session.execute(
+                select(TaskEvent)
+                .where(
+                    TaskEvent.task_id == task.id,
+                    TaskEvent.event_type == "task.status_changed",
+                )
+                .order_by(TaskEvent.seq)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    approvals = list(
+        (
+            await session.execute(
+                select(TaskApproval)
+                .where(TaskApproval.task_id == task.id)
+                .order_by(TaskApproval.created_at, TaskApproval.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    checkpoints = list(
+        (
+            await session.execute(
+                select(TaskWait)
+                .where(TaskWait.task_id == task.id)
+                .order_by(TaskWait.created_at, TaskWait.checkpoint_ref)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    audit_rows = list(
+        (
+            await session.execute(
+                select(AuditEvent)
+                .where(AuditEvent.task_id == task.id)
+                .order_by(AuditEvent.created_at, AuditEvent.id)
+                .limit(1000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    order = await session.scalar(select(Order).where(Order.task_id == task.id))
+    waits: list[dict[str, object]] = []
+    wait_started: datetime | None = None
+    wait_state: str | None = None
+
+    def close_wait(end_at: datetime) -> None:
+        nonlocal wait_started, wait_state
+        if wait_started is None:
+            return
+        waits.append(
+            {
+                "state": wait_state,
+                "start_at": wait_started.isoformat(),
+                "end_at": end_at.isoformat(),
+                "duration_ms": max(
+                    0, int((end_at - wait_started).total_seconds() * 1000)
+                ),
+                "active": False,
+            }
+        )
+        wait_started, wait_state = None, None
+
+    for event in status_events:
+        state = (
+            event.payload.get("state")
+            if event.event_type == "task.status_changed"
+            else None
+        )
+        if state in {"WAITING_INPUT", "WAITING_APPROVAL", "BLOCKED_RULE"}:
+            if wait_started is not None and state != wait_state:
+                close_wait(event.emitted_at)
+            if wait_started is None:
+                wait_started, wait_state = event.emitted_at, state
+        elif isinstance(state, str) and wait_started is not None:
+            close_wait(event.emitted_at)
+    if wait_started is not None:
+        now = datetime.now(UTC)
+        waits.append(
+            {
+                "state": wait_state,
+                "start_at": wait_started.isoformat(),
+                "end_at": None,
+                "duration_ms": max(0, int((now - wait_started).total_seconds() * 1000)),
+                "active": True,
+            }
+        )
+    event_by_span = {
+        str(event.span_id): event for event in events if event.span_id is not None
+    }
+    spans = []
+    for span in page:
+        failure = span.error if isinstance(span.error, dict) else {}
+        event = event_by_span.get(str(span.id))
+        spans.append(
+            {
+                "span_id": str(span.id),
+                "trace_id": str(span.trace_id),
+                "parent_span_id": str(span.parent_span_id)
+                if span.parent_span_id
+                else None,
+                "kind": span.kind,
+                "name": span.name,
+                "attempt": span.attempt,
+                "execution_mode": span.execution_mode,
+                "protocol": span.protocol,
+                "status": span.status,
+                "start_at": span.start_at.isoformat(),
+                "end_at": span.end_at.isoformat() if span.end_at else None,
+                "duration_ms": span.duration_ms,
+                "input": _trace_ref(span.input_ref),
+                "output": _trace_ref(span.output_ref),
+                "usage": _trace_usage(span.usage),
+                "usage_status": "available"
+                if _trace_usage(span.usage) is not None
+                else "unavailable",
+                "error": {
+                    "code": _trace_code(failure.get("code")),
+                    "retryable": bool(failure.get("retryable")),
+                },
+                "event_seq": event.seq if event else None,
+            }
+        )
+    metrics = {
+        "model_calls": len(model_spans),
+        "usage_available_calls": sum(value is not None for value in observed),
+        "usage_coverage": (
+            sum(value is not None for value in observed) / len(model_spans)
+        )
+        if model_spans
+        else None,
+        "usage_status": "available" if usage_complete else "unavailable",
+        "tokens": usage_total,
+        "model_duration_ms": sum(
+            span.duration_ms for span in model_spans if span.duration_ms is not None
+        ),
+        "tool_duration_ms": sum(
+            span.duration_ms
+            for span in all_spans
+            if span.kind == "TOOL" and span.duration_ms is not None
+        ),
+        "manual_waits": waits,
+    }
+    next_cursor = (
+        _encode_cursor(page[-1].start_at, page[-1].id) if has_more and page else None
+    )
+    return {
+        "data": {
+            "task_id": str(task.id),
+            "state": task.state,
+            "spans": spans,
+            "next_cursor": next_cursor,
+            "metrics": metrics,
+            "approvals": [
+                {
+                    "approval_id": str(item.id),
+                    "actor_id": str(item.actor_id),
+                    "decision": item.decision,
+                    "version": item.version,
+                    "content_hash": item.content_hash,
+                    "invalidated": item.invalidated_at is not None,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in approvals
+            ],
+            "checkpoints": [
+                {
+                    "checkpoint_id": item.checkpoint_ref,
+                    "interrupt_id": item.interrupt_id,
+                    "kind": item.kind,
+                    "draft_version": item.draft_version,
+                    "active": item.active,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in checkpoints
+            ],
+            "audit_events": [
+                {
+                    "action": item.action,
+                    "result": item.result,
+                    "actor_id": str(item.actor_id) if item.actor_id else None,
+                    "created_at": item.created_at.isoformat(),
+                    "object_ref": {
+                        key: value
+                        for key, value in (item.object_ref or {}).items()
+                        if key
+                        in {
+                            "draft_id",
+                            "version",
+                            "decision",
+                            "order_id",
+                            "approval_id",
+                        }
+                    },
+                }
+                for item in audit_rows
+            ],
+            "audit_events_truncated": len(audit_rows) == 1000,
+            "order": (
+                {
+                    "order_id": str(order.id),
+                    "order_number": order.number,
+                    "state": order.state,
+                }
+                if order
+                else None
+            ),
+            "events": [
+                {
+                    "seq": item.seq,
+                    "type": item.event_type,
+                    "span_id": str(item.span_id) if item.span_id else None,
+                    "payload": {
+                        key: value
+                        for key, value in item.payload.items()
+                        if key
+                        in {
+                            "state",
+                            "projection_version",
+                            "status",
+                            "code",
+                            "span_id",
+                            "kind",
+                            "name",
+                        }
+                        and (key != "code" or _trace_code(value) is not None)
+                    },
+                    "emitted_at": item.emitted_at.isoformat(),
+                }
+                for item in events
+            ],
+            "events_truncated": len(events) == 1000,
         },
         "request_id": request_id(request),
     }
