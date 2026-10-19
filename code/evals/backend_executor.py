@@ -156,10 +156,12 @@ class BackendCaseExecutor:
             Material,
             Order,
             QuotaOccupation,
+            RuntimeConfigSecret,
             TaskApproval,
             TaskCommand,
             TraceSpan,
         )
+        from app.runtime_config import content_hash
         from app.worker.queue import PersistentTaskWorker
         from app.worker.workflow import create_run_task_handler
 
@@ -275,6 +277,7 @@ class BackendCaseExecutor:
                     "input_at": fixed_time.isoformat(),
                 }
                 if case.get("simulate_mcp_unavailable") is True:
+                    # 配置快照可能被多个任务共用；复制快照和密钥引用，只让当前任务绑定故障地址。
                     task_row = await session.get(AgentTask, task_uuid)
                     if task_row is None or task_row.config_snapshot_id is None:
                         raise RuntimeError("MCP 故障注入案例缺少任务配置快照")
@@ -283,10 +286,43 @@ class BackendCaseExecutor:
                     )
                     if snapshot is None:
                         raise RuntimeError("MCP 故障注入案例的配置快照不存在")
-                    snapshot.content = {
+                    snapshot_content = {
                         **snapshot.content,
                         "mcp_url": "http://127.0.0.1:1/mcp",
                     }
+                    max_version = await session.scalar(
+                        select(func.max(ConfigSnapshot.version))
+                    )
+                    isolated_snapshot = ConfigSnapshot(
+                        id=uuid4(),
+                        version=int(max_version or 0) + 1,
+                        content=snapshot_content,
+                        content_hash=content_hash(snapshot_content),
+                        created_by=snapshot.created_by,
+                        is_current=False,
+                    )
+                    session.add(isolated_snapshot)
+                    await session.flush()
+                    task_row.config_snapshot_id = isolated_snapshot.id
+                    secret_rows = list(
+                        (
+                            await session.scalars(
+                                select(RuntimeConfigSecret).where(
+                                    RuntimeConfigSecret.snapshot_id == snapshot.id
+                                )
+                            )
+                        ).all()
+                    )
+                    session.add_all(
+                        RuntimeConfigSecret(
+                            id=uuid4(),
+                            snapshot_id=isolated_snapshot.id,
+                            name=secret.name,
+                            ciphertext=secret.ciphertext,
+                            cleared=secret.cleared,
+                        )
+                        for secret in secret_rows
+                    )
 
             handler = await create_run_task_handler(
                 session_factory=async_session_factory,
