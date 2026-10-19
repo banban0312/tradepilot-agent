@@ -229,6 +229,20 @@
       ],
       "final_text": "已保留合同配置单价及其来源，并完成额度核验。"
     },
+    "unauthorized-cross-department": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          }
+        ]
+      ],
+      "final_text": "无法查询该部门合同。"
+    },
     "abnormal-tool-type": {
       "rounds": [
         [
