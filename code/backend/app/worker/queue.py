@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from app.models import TaskJob
+from app.runtime_config import max_concurrency
 from app.tasks.service import (
     MAX_ACTIVE_TASKS,
     StaleExecutionEpoch,
@@ -73,10 +74,12 @@ class PersistentTaskWorker:
         job: TaskJob | None = None
         try:
             async with self.session_factory() as session, session.begin():
+                concurrency_limit = await max_concurrency(session)
                 job = await try_claim_job(
                     session,
                     worker_id=self.worker_id,
                     supported_kinds=frozenset(self.handlers),
+                    max_active_tasks=concurrency_limit,
                 )
             if job is None:
                 return False

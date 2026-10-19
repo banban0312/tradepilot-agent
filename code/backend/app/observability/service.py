@@ -18,8 +18,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.auth.context import AuthContext
-from app.config import settings
 from app.models import AuditEvent, TaskEvent, TaskEventCursor, TraceSpan
+from app.runtime_config import retention_days
 
 SpanStatus = Literal["OK", "ERROR", "INTERRUPTED"]
 _SECRET_KEY = re.compile(
@@ -397,7 +397,7 @@ async def purge_expired_trace_data(
     task_ids_with_orders: frozenset[UUID],
 ) -> RetentionResult:
     """清理过期运行轨迹；审计与游标永久保留，活动/已下单任务受保护。"""
-    cutoff = now - timedelta(days=settings.trace_retention_days)
+    cutoff = now - timedelta(days=await retention_days(session, "trace_retention_days"))
     running_ids = await session.scalars(
         select(TraceSpan.task_id)
         .where(TraceSpan.status == "RUNNING", TraceSpan.task_id.is_not(None))

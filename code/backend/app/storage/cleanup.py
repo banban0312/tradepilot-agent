@@ -12,6 +12,7 @@ from sqlalchemy import exists, select
 from app.config import settings
 from app.database import async_session_factory, engine
 from app.models import AgentTask, FieldEvidence, InputArtifact, Order, TaskArtifact
+from app.runtime_config import retention_days
 from app.storage.files import storage_path
 
 _ACTIVE_TASK_STATES = (
@@ -27,9 +28,11 @@ _ACTIVE_TASK_STATES = (
 async def cleanup_expired_artifacts(*, now: datetime | None = None) -> int:
     """先事务性标记可清理记录，再删除对象；失败后可安全重试。"""
     current = now or datetime.now(UTC)
-    cutoff = current - timedelta(days=settings.artifact_retention_days)
     removable: list[InputArtifact] = []
     async with async_session_factory() as session, session.begin():
+        cutoff = current - timedelta(
+            days=await retention_days(session, "artifact_retention_days")
+        )
         artifacts = list(
             (
                 await session.scalars(

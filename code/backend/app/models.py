@@ -145,6 +145,75 @@ class TaskSession(TimestampMixin, Base):
     last_task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
 
 
+class ConfigSnapshot(Base):
+    """仅保存脱敏运行参数的不可变版本；凭据仍由部署环境注入。"""
+
+    __tablename__ = "config_snapshots"
+    __table_args__ = (
+        CheckConstraint("version > 0", name="ck_config_snapshots_version_positive"),
+        UniqueConstraint("version", name="uq_config_snapshots_version"),
+        Index("ix_config_snapshots_current", "is_current"),
+        Index("ix_config_snapshots_created", "created_at", "id"),
+        Index(
+            "uq_config_snapshots_single_current",
+            "is_current",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_by: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", name="fk_config_snapshots_creator", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    is_current: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RuntimeConfigSecret(Base):
+    """由部署密钥加密的写入式配置凭据；读取接口只公开配置状态。"""
+
+    __tablename__ = "runtime_config_secrets"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id", "name", name="uq_runtime_config_secrets_snapshot_name"
+        ),
+        CheckConstraint(
+            "name IN ('model_api_key', 'ocr_api_key')",
+            name="ck_runtime_config_secrets_name",
+        ),
+        CheckConstraint(
+            "(cleared AND ciphertext IS NULL) OR (NOT cleared AND ciphertext IS NOT NULL)",
+            name="ck_runtime_config_secrets_state",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    snapshot_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "config_snapshots.id",
+            name="fk_runtime_config_secrets_snapshot",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    ciphertext: Mapped[str | None] = mapped_column(Text)
+    cleared: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+
 class AgentTask(TimestampMixin, Base):
     """任务是可恢复的业务执行身份，LangGraph thread_id 固定使用该 id。"""
 
@@ -202,7 +271,14 @@ class AgentTask(TimestampMixin, Base):
     checkpoint_ref: Mapped[str | None] = mapped_column(Text)
     current_step: Mapped[str | None] = mapped_column(Text)
     last_error: Mapped[dict[str, object] | None] = mapped_column(JSONB)
-    config_snapshot_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    config_snapshot_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "config_snapshots.id",
+            name="fk_agent_tasks_config_snapshot",
+            ondelete="RESTRICT",
+        ),
+    )
 
 
 class InputArtifact(TimestampMixin, Base):
