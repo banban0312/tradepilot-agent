@@ -130,20 +130,22 @@ def _field_candidates(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     patterns: dict[str, re.Pattern[str]] = {
         "contract_number": re.compile(
-            r"(?:合同编号|合同号|contract\s*(?:no|number))\s*[:：#;；]?\s*([A-Za-z0-9][A-Za-z0-9/_-]{2,})",
+            r"(?:合\s*同\s*编\s*号|合\s*同\s*号|contract\s*(?:no|number))\s*[:：#;；]?\s*([A-Za-z0-9][A-Za-z0-9/_-]{2,})",
             re.IGNORECASE,
         ),
         "customer": re.compile(
             r"(?:客户名称|客户|需方|买方|购方|签约单位)\s*[:：]?\s*([^，,；;\n]{2,40})"
         ),
         "material": re.compile(
-            r"(?:物料名称|产品名称|商品名称|材料名称|物料|品名)\s*[:：]?\s*([^，,；;\n]{2,60})"
+            r"(?:物\s*料\s*名\s*称|产\s*品\s*名\s*称|商\s*品\s*名\s*称|材\s*料\s*名\s*称|物\s*料|品\s*名)\s*[:：]?\s*([^，,；;\n]{2,60})"
         ),
         "specification": re.compile(
-            r"(?:规格型号|规格|型号)\s*[:：]?\s*([^，,；;\n]{1,40})"
+            # OCR 可能在复合中文标签内部插入空格；长标签必须优先整体匹配，
+            # 避免把“型 号：”误收进规格值。
+            r"(?:规格\s*型\s*号|规格|型号)\s*[:：]?\s*([^，,；;\n]{1,40})"
         ),
         "quantity": re.compile(
-            r"(?:数量|qty|quantity)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(吨|tons?|tonnes?|t|kg|千克|件|套|米|根)?",
+            r"(?:数\s*量|qty|quantity)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(吨|tons?|tonnes?|t|kg|千克|件|套|米|根)?",
             re.IGNORECASE,
         ),
         "amount": re.compile(
@@ -173,7 +175,7 @@ def _field_candidates(
                     continue
                 candidate = {
                     "field": field,
-                    "value": match.group(1).strip(),
+                    "value": _normalize_candidate_value(match.group(1)),
                     "page_number": page["page_number"],
                     "raw_text": line["text"],
                     "locator": line["locator"],
@@ -203,6 +205,11 @@ def _field_candidates(
             for candidate in candidates
         )
     return fields, [field for field in required if field not in found]
+
+
+def _normalize_candidate_value(value: str) -> str:
+    """修正 OCR 在汉字之间插入的空格，原始识别文本仍原样保留。"""
+    return re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])", "", value.strip())
 
 
 def parse_pdf(path: Path, input_sha256: str) -> dict[str, Any]:
