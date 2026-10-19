@@ -104,9 +104,14 @@ class BackendCaseExecutor:
         if mode != self.mode:
             raise ValueError("评测执行器模式与服务模式不一致")
         actions = [action.get("kind") for action in case.get("actions", [])]
-        if not actions or actions[0] != "create_task":
+        if actions != ["attempt_approve"] and (
+            not actions or actions[0] != "create_task"
+        ):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
-        if actions[1:] not in ([], ["human_approve_current_version", "commit_once"]):
+        if actions[0] == "create_task" and actions[1:] not in (
+            [],
+            ["human_approve_current_version", "commit_once"],
+        ):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
         if case.get("input", {}).get("kind") != "text":
             raise CaseSkipped("EVAL_FILE_INPUT_NOT_SUPPORTED")
@@ -160,6 +165,9 @@ class BackendCaseExecutor:
             TaskApproval,
             TaskCommand,
             TraceSpan,
+            User,
+            UserDepartmentScope,
+            UserRole,
         )
         from app.runtime_config import content_hash
         from app.worker.queue import PersistentTaskWorker
@@ -168,7 +176,9 @@ class BackendCaseExecutor:
         password = self.settings.demo_password
         if password is None or not password.get_secret_value():
             raise ValueError("隔离演示账号密码未配置")
-        actor = self.fixtures["actors"].get(case["actor_fixture"])
+        actor_fixture_id = case.get("setup_actor_fixture") or case["actor_fixture"]
+        actor = self.fixtures["actors"].get(actor_fixture_id)
+        review_actor = dict(self.fixtures["actors"].get(case["actor_fixture"], {}))
         contract_fixture = self.fixtures["contracts"].get(case["contract_fixture"])
         if not isinstance(actor, dict) or not isinstance(contract_fixture, dict):
             raise TypeError("案例引用的账号或合同夹具不存在")
@@ -180,6 +190,8 @@ class BackendCaseExecutor:
             raise ValueError("在线案例缺少文本输入")
 
         headers = {"Origin": self.settings.app_origin or "http://localhost"}
+        action_error_code = None
+        action_status_code = None
         async with httpx.AsyncClient(
             base_url=self.api_url,
             timeout=httpx.Timeout(self.settings.model_timeout_seconds + 30),
@@ -234,6 +246,16 @@ class BackendCaseExecutor:
                             )
                         )
                 if extra_customer_ids:
+                    await session.commit()
+                if actions == ["attempt_approve"]:
+                    review_actor = await self._seed_wrong_department_approver(
+                        session,
+                        review_actor,
+                        User=User,
+                        UserRole=UserRole,
+                        UserDepartmentScope=UserDepartmentScope,
+                        Department=Department,
+                    )
                     await session.commit()
                 contract = await session.scalar(
                     select(Contract).where(Contract.number == contract_number)
@@ -349,6 +371,24 @@ class BackendCaseExecutor:
                     else self.fixtures["actors"]["admin"],
                     worker=worker,
                 )
+            elif actions == ["attempt_approve"]:
+                action_error_code, action_status_code = await self._attempt_review_as(
+                    client=client,
+                    task_id=task_id,
+                    approver=review_actor,
+                )
+                # 越权验证会切换到对目标部门无权的账号；恢复任务所有者身份才能读取后置事实。
+                owner_login = await client.post(
+                    "/api/v1/auth/login",
+                    json={
+                        "login": actor["login"],
+                        "password": password.get_secret_value(),
+                    },
+                )
+                owner_login.raise_for_status()
+                client.headers["X-CSRF-Token"] = owner_login.json()["data"][
+                    "csrf_token"
+                ]
 
             task_response = await client.get(f"/api/v1/tasks/{task_id}")
             task_response.raise_for_status()
@@ -453,6 +493,10 @@ class BackendCaseExecutor:
                 "error_code": last_error.get("code")
                 if isinstance(last_error, dict)
                 else None,
+            },
+            "action": {
+                "error_code": action_error_code,
+                "status_code": action_status_code,
             },
             "draft": {
                 "fields": draft_fields,
@@ -655,6 +699,84 @@ class BackendCaseExecutor:
         review_response.raise_for_status()
         if not await worker.run_once():
             raise RuntimeError("人工审批后隔离 Worker 未领取恢复作业")
+
+    async def _seed_wrong_department_approver(
+        self,
+        session,
+        actor: dict,
+        *,
+        User,
+        UserRole,
+        UserDepartmentScope,
+        Department,
+    ) -> dict:
+        """在隔离库创建最小跨部门审批身份，避免扩大常规演示账号权限。"""
+        from app.auth.passwords import hash_password
+
+        department = await session.scalar(
+            select(Department).where(Department.code == "TP-DEMO-SOUTH")
+        )
+        if department is None:
+            raise ValueError("隔离数据库缺少南区部门")
+        login = "demo-eval-approver-south"
+        user_id = uuid5(NAMESPACE_URL, "tradepilot-eval:approver-south")
+        user = await session.get(User, user_id)
+        if user is None:
+            password = self.settings.demo_password
+            if password is None:
+                raise ValueError("隔离演示账号密码未配置")
+            session.add_all(
+                [
+                    User(
+                        id=user_id,
+                        login=login,
+                        password_hash=hash_password(password.get_secret_value()),
+                        department_id=department.id,
+                        active=True,
+                    ),
+                    UserRole(user_id=user_id, role="business_approver"),
+                    UserDepartmentScope(user_id=user_id, department_id=department.id),
+                ]
+            )
+            await session.flush()
+        return {**actor, "login": login}
+
+    async def _attempt_review_as(self, *, client, task_id, approver) -> tuple[str, int]:
+        """记录越权审批 API 的真实拒绝；不会伪造任务终态或审批记录。"""
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        task_response.raise_for_status()
+        task = task_response.json()["data"]
+        active_wait = task.get("active_wait")
+        if task.get("state") != "WAITING_APPROVAL" or not isinstance(active_wait, dict):
+            raise RuntimeError("越权审批案例没有有效的审批等待点")
+
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        login_response.raise_for_status()
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        response = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": f"eval-wrong-approver-{uuid4().hex}"},
+            json={
+                "decision": "APPROVE",
+                "draft_version": active_wait["draft_version"],
+                "content_hash": active_wait["content_hash"],
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+            },
+        )
+        if response.status_code != 404:
+            raise RuntimeError(f"越权审批应返回 404，实际为 {response.status_code}")
+        payload = response.json()
+        error = payload.get("error")
+        if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+            raise TypeError("越权审批拒绝响应缺少稳定错误码")
+        return error["code"], response.status_code
 
 
 async def _normalize_draft_fields(

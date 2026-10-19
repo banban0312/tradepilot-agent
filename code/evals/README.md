@@ -42,7 +42,8 @@
 - `normal-approved-order` 通过独立授权审批人登录并提交绑定当前草稿版本的审批，再由真实 Worker 恢复并提交订单；执行器不会代替用户批准。
 - `normal-multiple-lines` 在隔离数据库创建两条真实合同明细，并断言各行物料、数量、单价及金额均正确。
 - `abnormal-mcp-unavailable` 仅将评测 Worker 的 MCP 地址指向隔离容器内未监听端口，以真实连接失败检查错误码与无订单副作用。
-- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-multiple-lines`、`normal-approved-order`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`abnormal-mcp-unavailable`、`ambiguity-missing-spec`、`ambiguity-material-alias`、`ambiguity-missing-date`、`ambiguity-missing-price`、`ambiguity-similar-customer`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`、`unauthorized-direct-commit`、`quota-over`、`quota-equal`、`quota-over-by-cent`、`quota-inactive-contract`、`quota-purchase-isolated`、`quota-note-no-bypass`。其余固定案例仍须逐步补齐执行路径与证据。
+- `unauthorized-wrong-approver` 在隔离数据库临时创建南区审批身份，尝试审批北区任务；验证 API 以 `404 RESOURCE_NOT_FOUND` 隐藏跨部门任务，并由原经办人回查等待状态及零订单、零审批、零占额事实。专用身份只存在于本次隔离数据库。
+- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-multiple-lines`、`normal-approved-order`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`abnormal-mcp-unavailable`、`ambiguity-missing-spec`、`ambiguity-material-alias`、`ambiguity-missing-date`、`ambiguity-missing-price`、`ambiguity-similar-customer`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`、`unauthorized-direct-commit`、`unauthorized-wrong-approver`、`quota-over`、`quota-equal`、`quota-over-by-cent`、`quota-inactive-contract`、`quota-purchase-isolated`、`quota-note-no-bypass`。其余固定案例仍须逐步补齐执行路径与证据。
 
 ## 本地测试
 

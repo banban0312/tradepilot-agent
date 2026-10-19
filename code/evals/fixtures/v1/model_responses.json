@@ -1300,6 +1300,9 @@
         ]
       ],
       "final_text": "模型没有创建正式订单权限。"
+    },
+    "unauthorized-wrong-approver": {
+      "extends": "normal-complete-sales"
     }
   }
 }
