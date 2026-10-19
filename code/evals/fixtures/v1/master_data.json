@@ -45,6 +45,19 @@
         "occupied_amount": "0.00"
       }
     },
+    "sales_north_multi_line": {
+      "number": "TP-EVAL-SALES-NORTH-MULTI-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "valid_from": "2025-01-01",
+      "valid_to": "2030-12-31",
+      "total_amount": "150000.00",
+      "lines": [
+        { "material_id": "MAT-30", "price": "3500.00", "unit": "吨", "max_quantity": "100.000" },
+        { "material_id": "MAT-32", "price": "4800.00", "unit": "吨", "max_quantity": "100.000" }
+      ]
+    },
     "sales_north_small_balance": {
       "number": "TP-EVAL-SALES-NORTH-01",
       "direction": "sales",

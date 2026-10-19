@@ -10,7 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 from sqlalchemy import func, select
@@ -427,24 +427,15 @@ class BackendCaseExecutor:
         )
         if department is None:
             raise ValueError("隔离数据库缺少合同夹具所属部门")
-        line_fixture = fixture.get("line")
-        if not isinstance(line_fixture, dict):
-            raise TypeError("合同夹具缺少合同明细")
-        material_fixture = next(
-            (
-                item
-                for item in self.fixtures.get("materials", [])
-                if item.get("id") == line_fixture.get("material_id")
-            ),
-            None,
-        )
-        if material_fixture is None:
-            raise ValueError("合同夹具引用了不存在的物料")
-        material = await session.scalar(
-            select(Material).where(Material.code == material_fixture["source_code"])
-        )
-        if material is None:
-            raise ValueError("隔离数据库缺少合同夹具引用的物料")
+        line_fixtures = fixture.get("lines")
+        if line_fixtures is None:
+            line_fixtures = [fixture.get("line")]
+        if (
+            not isinstance(line_fixtures, list)
+            or not line_fixtures
+            or any(not isinstance(item, dict) for item in line_fixtures)
+        ):
+            raise TypeError("合同夹具缺少有效合同明细")
 
         contract_id = uuid5(NAMESPACE_URL, f"tradepilot-eval:{fixture_id}:contract")
         contract = Contract(
@@ -473,36 +464,60 @@ class BackendCaseExecutor:
         )
         session.add(contract)
         await session.flush()
-        line_id = uuid5(NAMESPACE_URL, f"tradepilot-eval:{fixture_id}:line:0")
-        line = ContractLine(
-            id=line_id,
-            contract_id=contract.id,
-            material_id=material.id,
-            unit=line_fixture.get("unit") or material.unit,
-            unit_price=(
-                Decimal(str(line_fixture["price"]))
-                if line_fixture.get("price") is not None
-                else None
-            ),
-            max_quantity=(
-                Decimal(str(line_fixture["max_quantity"]))
-                if line_fixture.get("max_quantity") is not None
-                else None
-            ),
-        )
+        lines = []
+        line_balances = []
+        for index, line_fixture in enumerate(line_fixtures):
+            material_fixture = next(
+                (
+                    item
+                    for item in self.fixtures.get("materials", [])
+                    if item.get("id") == line_fixture.get("material_id")
+                ),
+                None,
+            )
+            if material_fixture is None:
+                raise ValueError("合同夹具引用了不存在的物料")
+            material = await session.scalar(
+                select(Material).where(Material.code == material_fixture["source_code"])
+            )
+            if material is None:
+                raise ValueError("隔离数据库缺少合同夹具引用的物料")
+            # get_contract 按明细主键排序；隔离夹具主键按输入序号递增，保证明细顺序稳定。
+            line_id = UUID(int=contract_id.int + index + 1)
+            lines.append(
+                ContractLine(
+                    id=line_id,
+                    contract_id=contract.id,
+                    material_id=material.id,
+                    unit=line_fixture.get("unit") or material.unit,
+                    unit_price=(
+                        Decimal(str(line_fixture["price"]))
+                        if line_fixture.get("price") is not None
+                        else None
+                    ),
+                    max_quantity=(
+                        Decimal(str(line_fixture["max_quantity"]))
+                        if line_fixture.get("max_quantity") is not None
+                        else None
+                    ),
+                )
+            )
+            line_balances.append(
+                ContractLineBalance(
+                    contract_line_id=line_id,
+                    occupied_quantity=Decimal("0.000000"),
+                )
+            )
         session.add_all(
             [
-                line,
+                *lines,
                 ContractBalance(
                     contract_id=contract.id,
                     occupied_amount=Decimal("0.00"),
                     occupied_order_count=0,
                     version=0,
                 ),
-                ContractLineBalance(
-                    contract_line_id=line.id,
-                    occupied_quantity=Decimal("0.000000"),
-                ),
+                *line_balances,
             ]
         )
         await session.flush()
@@ -574,6 +589,50 @@ async def _normalize_draft_fields(
             fields["contract_number"] = contract.number
     items = persisted_items or candidate.get("items") or []
     fields["line_count"] = len(items)
+    fields["line_material_ids"] = []
+    fields["line_details"] = []
+    for line_item in items:
+        get_line_value = (
+            (lambda key, item=line_item: getattr(item, key))
+            if not isinstance(line_item, dict)
+            else (lambda key, item=line_item: item.get(key))
+        )
+        material_id = get_line_value("material_id")
+        material = (
+            await session.get(
+                Material,
+                UUID(str(material_id))
+                if not isinstance(material_id, UUID)
+                else material_id,
+            )
+            if material_id
+            else None
+        )
+        fixture_material = next(
+            (
+                entry
+                for entry in fixtures.get("materials", [])
+                if material is not None and entry.get("source_code") == material.code
+            ),
+            None,
+        )
+        fields["line_material_ids"].append(
+            fixture_material["id"] if fixture_material else None
+        )
+        detail = {
+            "material_id": fixture_material["id"]
+            if fixture_material
+            else material.code
+            if material
+            else None
+        }
+        for source in ("quantity", "unit_price", "amount"):
+            value = get_line_value(source)
+            if value is not None:
+                decimal_value = Decimal(str(value))
+                places = Decimal("0.001") if source == "quantity" else Decimal("0.01")
+                detail[source] = format(decimal_value.quantize(places), "f")
+        fields["line_details"].append(detail)
     if items:
         item = items[0]
         get_item_value = (

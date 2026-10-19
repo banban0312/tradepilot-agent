@@ -107,6 +107,16 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
     first_case = next(case for case in cases if case["id"] == "normal-complete-sales")
     assert first_case["contract_fixture"] == "sales_north_default"
     assert "TP-DEMO-SALES-N1" in first_case["input"]["value"]
+    multi_line_case = next(
+        case for case in cases if case["id"] == "normal-multiple-lines"
+    )
+    assert multi_line_case["contract_fixture"] == "sales_north_multi_line"
+    assert multi_line_case["expected"]["fields"]["line_count"] == 2
+    assert len(multi_line_case["expected"]["fields"]["line_details"]) == 2
+    fixtures = json.loads(
+        (root / "fixtures/v1/master_data.json").read_text(encoding="utf-8")
+    )
+    assert len(fixtures["contracts"]["sales_north_multi_line"]["lines"]) == 2
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")
