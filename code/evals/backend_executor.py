@@ -143,6 +143,7 @@ class BackendCaseExecutor:
         from app.database import async_session_factory, engine
         from app.models import (
             AgentTask,
+            ConfigSnapshot,
             Contract,
             ContractBalance,
             ContractLine,
@@ -273,6 +274,19 @@ class BackendCaseExecutor:
                     **command.payload,
                     "input_at": fixed_time.isoformat(),
                 }
+                if case.get("simulate_mcp_unavailable") is True:
+                    task_row = await session.get(AgentTask, task_uuid)
+                    if task_row is None or task_row.config_snapshot_id is None:
+                        raise RuntimeError("MCP 故障注入案例缺少任务配置快照")
+                    snapshot = await session.get(
+                        ConfigSnapshot, task_row.config_snapshot_id
+                    )
+                    if snapshot is None:
+                        raise RuntimeError("MCP 故障注入案例的配置快照不存在")
+                    snapshot.content = {
+                        **snapshot.content,
+                        "mcp_url": "http://127.0.0.1:1/mcp",
+                    }
 
             handler = await create_run_task_handler(
                 session_factory=async_session_factory,
