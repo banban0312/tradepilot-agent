@@ -161,4 +161,18 @@ describe('Issue #32 全屏与悬浮窗共享任务状态', () => {
     expect(workspace.replyText).toBe('这段内容不能提交为审批决定')
     expect(serviceMocks.supplement).not.toHaveBeenCalled()
   })
+
+  it('补充信息请求失败时保留原输入并释放共享提交锁', async () => {
+    serviceMocks.get.mockResolvedValue(snapshot())
+    serviceMocks.supplement.mockRejectedValue(new Error('网络暂时不可用'))
+    const workspace = useTaskWorkspaceStore()
+    await workspace.activateTask('task-1')
+    workspace.replyText = '请送到二号仓库'
+
+    await expect(workspace.submitReply()).rejects.toThrow('网络暂时不可用')
+
+    expect(workspace.replyText).toBe('请送到二号仓库')
+    expect(workspace.commandSubmitting).toBe(false)
+    expect(serviceMocks.supplement).toHaveBeenCalledTimes(1)
+  })
 })

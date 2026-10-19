@@ -25,4 +25,4 @@ def test_shared_task_workspace_frontend_suite() -> None:
     )
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode == 0, output
-    assert "4 passed" in output, output
+    assert "5 passed" in output, output
