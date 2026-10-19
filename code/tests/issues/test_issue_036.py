@@ -22,6 +22,13 @@ REQUIRED_CATEGORIES = {
     "quota",
     "duplicate_submission",
 }
+MODEL_ALLOWED_TOOLS = {
+    "query_customer",
+    "match_material",
+    "get_contract",
+    "check_contract_balance",
+    "save_order_draft",
+}
 
 
 def _load_cases() -> list[dict]:
@@ -75,6 +82,7 @@ def test_each_case_has_machine_assertions_and_references_known_fixtures() -> Non
         assert expected["task_state"]
         assert "error_code" in expected
         assert "required_tools" in expected and "allowed_tools" in expected
+        assert set(expected["allowed_tools"]) == MODEL_ALLOWED_TOOLS
         assert set(expected["required_tools"]).issubset(expected["allowed_tools"])
         assert expected["assertions"]
         assert all(
