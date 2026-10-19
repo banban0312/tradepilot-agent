@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from app.worker.workflow import DatabaseWorkflowServices
 
 from evals.runner import main
 from evals.service import (
@@ -82,6 +85,15 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
         load_dataset(root, "..")
     with pytest.raises(ValueError, match="找不到"):
         select_cases(cases, case_ids={"missing-case"}, categories=None)
+
+
+def test_backend_rule_date_uses_fixed_task_time_instead_of_wall_clock() -> None:
+    services = DatabaseWorkflowServices.__new__(DatabaseWorkflowServices)
+    services.config = SimpleNamespace(business_timezone="Asia/Shanghai")
+
+    assert services._business_date({"input_at": "2026-10-16T09:00:00+08:00"}) == (
+        date(2026, 10, 16)
+    )
 
 
 def test_assertions_require_exact_values_and_report_atomic_artifacts(
@@ -386,3 +398,21 @@ async def test_contract_price_fallback_is_server_sourced_and_auditable() -> None
         )
         == 1
     )
+
+
+def test_selected_tool_trace_includes_schema_rejected_model_calls() -> None:
+    from types import SimpleNamespace
+
+    from evals.backend_executor import _model_selected_tools
+
+    rows = [
+        SimpleNamespace(kind="TOOL", name="mcp.list_tools", output_ref={}),
+        SimpleNamespace(
+            kind="MODEL",
+            name="model.function_calling",
+            output_ref={"tool_calls": [{"name": "get_contract"}]},
+        ),
+        SimpleNamespace(kind="RULE", name="tool_argument_validation", output_ref={}),
+    ]
+
+    assert _model_selected_tools(rows) == ["get_contract"]

@@ -454,9 +454,14 @@ def _model_selected_tools(trace_rows) -> list[str]:
         "check_contract_balance",
         "save_order_draft",
     }
-    return [
-        span.name for span in trace_rows if span.kind == "TOOL" and span.name in allowed
-    ]
+    selected = []
+    for span in trace_rows:
+        if span.kind != "MODEL" or not isinstance(span.output_ref, dict):
+            continue
+        for call in span.output_ref.get("tool_calls", []):
+            if isinstance(call, dict) and call.get("name") in allowed:
+                selected.append(call["name"])
+    return selected
 
 
 class FixtureModelClient:

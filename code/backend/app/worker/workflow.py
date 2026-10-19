@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -87,6 +87,11 @@ class DatabaseWorkflowServices:
             model_execution_mode=model_execution_mode,
         )
 
+    def _business_date(self, state: WorkflowState) -> date:
+        """Use the task's fixed input timestamp for deterministic business rules."""
+        input_at = datetime.fromisoformat(state["input_at"])
+        return input_at.astimezone(ZoneInfo(self.config.business_timezone)).date()
+
     async def execute_tools(self, state: WorkflowState) -> Mapping[str, Any]:
         result = await self.runner.run(
             task_id=self.task.id,
@@ -124,23 +129,27 @@ class DatabaseWorkflowServices:
             if snapshot is None:
                 raise RuntimeError("草稿头存在但当前版本缺失")
             issues = list(snapshot.issues)
+            block_reason = ""
             if snapshot.is_validated and snapshot.candidate is not None:
                 precheck = await precheck_candidate(
                     session,
                     candidate=snapshot.candidate,
                     actor=self.actor,
-                    business_date=datetime.now(
-                        ZoneInfo(self.config.business_timezone)
-                    ).date(),
+                    business_date=self._business_date(state),
                 )
                 issues.extend(precheck.issues)
-            return {
+                if precheck.issues:
+                    block_reason = precheck.issues[0].message
+            result = {
                 "draft_id": str(snapshot.draft_id),
                 "draft_version": snapshot.version,
                 "missing_fields": [
                     {"field": item.field, "message": item.message} for item in issues
                 ],
             }
+            if block_reason:
+                result["block_reason"] = block_reason
+            return result
 
     async def verify_persisted_draft(self, state: WorkflowState) -> Mapping[str, Any]:
         async with self.session_factory() as session:
@@ -158,9 +167,7 @@ class DatabaseWorkflowServices:
                     session,
                     candidate=snapshot.candidate,
                     actor=self.actor,
-                    business_date=datetime.now(
-                        ZoneInfo(self.config.business_timezone)
-                    ).date(),
+                    business_date=self._business_date(state),
                 )
                 issues.extend(precheck.issues)
             return {

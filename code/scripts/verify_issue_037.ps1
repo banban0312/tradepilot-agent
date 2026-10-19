@@ -22,7 +22,8 @@ $composeArgs = @(
 $environmentNames = @(
     "POSTGRES_PORT", "API_PORT", "MCP_HOST_PORT", "APP_ORIGIN",
     "DEMO_MODE", "DEMO_PASSWORD", "DEMO_ALLOW_SELF_APPROVAL",
-    "SESSION_COOKIE_SECURE", "MCP_CONTEXT_SIGNING_KEY", "EVAL_PROJECT_NAME"
+    "SESSION_COOKIE_SECURE", "MCP_CONTEXT_SIGNING_KEY", "EVAL_PROJECT_NAME",
+    "PYTHONPATH"
 )
 $oldEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -63,6 +64,7 @@ try {
     $env:DEMO_PASSWORD = "TP-Eval-" + [Guid]::NewGuid().ToString("N")
     $env:SESSION_COOKIE_SECURE = "false"
     $env:EVAL_PROJECT_NAME = $projectName
+    $env:PYTHONPATH = "backend;."
     $key = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
     $env:MCP_CONTEXT_SIGNING_KEY = [Convert]::ToBase64String($key)
