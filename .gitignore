@@ -225,3 +225,4 @@ __marimo__/
 # TradePilot front-end
 code/frontend/node_modules/
 code/frontend/dist/
+code/artifacts/evals/

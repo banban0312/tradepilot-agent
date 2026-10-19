@@ -1,0 +1,1994 @@
+"""通过真实 API、Worker、MCP 与隔离 PostgreSQL 执行单案例评测。"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import sys
+from copy import deepcopy
+from datetime import date, datetime
+from decimal import Decimal
+from pathlib import Path
+from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+
+import httpx
+from sqlalchemy import func, select
+from sqlalchemy.engine import make_url
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[1] / "backend"
+if not _BACKEND_ROOT.is_dir():
+    _BACKEND_ROOT = Path("/app")
+if _BACKEND_ROOT.is_dir() and str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from evals.service import CaseSkipped
+
+
+class QuotaRaceSecondTaskError(RuntimeError):
+    """第二笔任务未能进入待审批状态。"""
+
+
+class QuotaRaceWorkerClaimError(RuntimeError):
+    """两个并发 Worker 未能分别领取额度竞争作业。"""
+
+
+class QuotaRaceOutcomeError(RuntimeError):
+    """额度竞争结果不符合一笔成功、一笔阻断的不变量。"""
+
+    def __init__(self, state_summary: dict[str, dict[str, str | None]]) -> None:
+        self.evaluation_stage = json.dumps(
+            state_summary, ensure_ascii=False, sort_keys=True
+        )
+        super().__init__("额度并发结果必须恰有一笔完成、一笔超额阻断")
+
+
+class BackendCaseExecutor:
+    """每例走正式任务 API 与持久 Worker，仅在线模式调用已配置模型。"""
+
+    def __init__(self, *, mode: str, manifest: dict, seed: int) -> None:
+        del seed  # 固定时钟取自每条数据集案例；模型调用本身不使用随机数。
+        self.mode = mode
+        self.manifest = manifest
+        self.api_url = os.getenv("EVAL_API_URL", "http://api:8000").rstrip("/")
+        self.project_name = os.getenv("EVAL_PROJECT_NAME", "")
+        if os.getenv("TRADEPILOT_EVAL_SANDBOX") != "1":
+            raise ValueError("真实评测必须在显式隔离的 Docker 数据域中运行")
+        if not self.project_name.startswith("tp-issue037-"):
+            raise ValueError("隔离 Compose 项目名必须以 tp-issue037- 开头")
+        parsed_api = urlsplit(self.api_url)
+        if parsed_api.hostname != "api":
+            raise ValueError("评测 API 必须使用隔离 Compose 网络中的 api 服务")
+
+        from app.config import settings
+
+        self.settings = settings
+        database_url = make_url(settings.database_url.get_secret_value())
+        if database_url.host != "db":
+            raise ValueError("评测数据库必须是隔离 Compose 网络中的 db 服务")
+        if (
+            mode == "online"
+            and settings.model_configuration_state != "configured_unverified"
+        ):
+            raise ValueError("在线评测缺少模型供应商、模型名或密钥配置")
+        self.fixtures = json.loads(
+            (
+                Path(__file__).resolve().parent / "fixtures/v1/master_data.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.file_fixtures = json.loads(
+            (Path(__file__).resolve().parent / "fixtures/v1/index.json").read_text(
+                encoding="utf-8"
+            )
+        ).get("files", {})
+        model_fixture_path = (
+            Path(__file__).resolve().parent / "fixtures/v1/model_responses.json"
+        )
+        self.model_fixtures = (
+            json.loads(model_fixture_path.read_text(encoding="utf-8"))
+            if model_fixture_path.is_file()
+            else {"version": None, "cases": {}}
+        )
+        from app.agent.function_calling import (
+            REQUIRED_BUSINESS_TOOLS,
+            SYSTEM_INSTRUCTIONS,
+        )
+        from app.mcp_server.client import INPUT_SCHEMAS
+
+        schema_payload = {
+            name: INPUT_SCHEMAS[name].model_json_schema()
+            for name in sorted(REQUIRED_BUSINESS_TOOLS)
+        }
+        self.metadata = {
+            "provider": settings.model_provider
+            if mode == "online"
+            else "offline_fixture",
+            "model": settings.model_name
+            if mode == "online"
+            else "offline-response-fixtures",
+            "system_prompt_sha256": hashlib.sha256(
+                SYSTEM_INSTRUCTIONS.encode("utf-8")
+            ).hexdigest(),
+            "tool_schema_sha256": hashlib.sha256(
+                json.dumps(schema_payload, sort_keys=True, ensure_ascii=False).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "tool_names": sorted(REQUIRED_BUSINESS_TOOLS),
+            "model_configuration": (
+                settings.model_configuration_state
+                if mode == "online"
+                else "not_used_offline"
+            ),
+            "offline_response_fixture_version": self.model_fixtures.get("version"),
+        }
+
+    async def execute_case(self, case: dict, *, mode: str) -> dict:
+        if mode != self.mode:
+            raise ValueError("评测执行器模式与服务模式不一致")
+        actions = [action.get("kind") for action in case.get("actions", [])]
+        duplicate_replay_case = case.get("id") == "duplicate-same-key" and actions == [
+            "create_task",
+            "human_approve_current_version",
+            "commit_once",
+            "replay_same_approved_command",
+        ]
+        stale_approval_case = case.get(
+            "id"
+        ) == "unauthorized-old-approval" and actions == [
+            "create_task",
+            "submit_approval",
+            "edit_draft",
+            "replay_stale_approval",
+        ]
+        stale_commit_case = case.get(
+            "id"
+        ) == "duplicate-commit-stale-approval" and actions == [
+            "edit_draft",
+            "commit_old_approval",
+        ]
+        recovery_approval_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-approval" and actions == [
+            "restart_worker",
+            "resume_task",
+        ]
+        recovery_input_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-input" and actions == [
+            "restart_worker",
+            "resume_task",
+            "provide_input_once",
+        ]
+        duplicate_double_click_case = case.get(
+            "id"
+        ) == "duplicate-double-click" and actions == ["concurrent_commit"]
+        duplicate_draft_replay_case = case.get("id") == "duplicate-draft-replay"
+        lost_commit_response_case = case.get("id") in {
+            "duplicate-lost-response",
+            "special-unknown-commit",
+        }
+        concurrent_commit_case = case.get("id") == "special-concurrency-idempotency"
+        commit_payload_conflict_case = (
+            case.get("id") == "duplicate-key-payload-conflict"
+        )
+        quota_competition_case = case.get("id") == "special-concurrency-quota"
+        if (
+            not duplicate_replay_case
+            and not stale_commit_case
+            and not recovery_approval_case
+            and not recovery_input_case
+            and not duplicate_double_click_case
+            and not duplicate_draft_replay_case
+            and not lost_commit_response_case
+            and not concurrent_commit_case
+            and not commit_payload_conflict_case
+            and not quota_competition_case
+            and actions != ["attempt_approve"]
+            and (not actions or actions[0] != "create_task")
+        ):
+            raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
+        if (
+            actions[0] == "create_task"
+            and actions[1:]
+            not in (
+                [],
+                ["human_approve_current_version", "commit_once"],
+            )
+            and not duplicate_replay_case
+            and not stale_approval_case
+        ):
+            raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
+        input_kind = case.get("input", {}).get("kind")
+        if input_kind == "file":
+            return await self._execute_file_case(case)
+        if input_kind != "text":
+            raise CaseSkipped("EVAL_FILE_INPUT_NOT_SUPPORTED")
+        if mode == "offline":
+            fixture = self.model_fixtures.get("cases", {}).get(case["id"])
+            if fixture is None:
+                raise CaseSkipped("EVAL_OFFLINE_MODEL_FIXTURE_UNAVAILABLE")
+            base_fixture_id = fixture.get("extends")
+            if base_fixture_id is not None:
+                base_fixture = self.model_fixtures.get("cases", {}).get(base_fixture_id)
+                if not isinstance(base_fixture, dict):
+                    raise ValueError("离线模型响应夹具继承目标不存在")
+                fixture = {**base_fixture, **fixture}
+            if self.model_fixtures.get("version") != self.manifest.get(
+                "input_fixture_version"
+            ):
+                raise ValueError("离线模型响应夹具版本与数据集输入版本不一致")
+
+            fixture_runs = 0
+
+            def model_client_factory(_config):
+                nonlocal fixture_runs
+                selected_fixture = fixture
+                if (stale_approval_case or stale_commit_case) and fixture_runs > 0:
+                    # 草稿编辑已保存版本 2；恢复流程的固定工具调用必须以该版本为基线。
+                    selected_fixture = deepcopy(fixture)
+                    for round_calls in selected_fixture.get("rounds", []):
+                        for call in round_calls:
+                            if call.get("name") == "save_order_draft":
+                                call["arguments"]["expected_version"] = 2
+                elif recovery_input_case and fixture_runs > 0:
+                    selected_fixture = deepcopy(
+                        self.model_fixtures["cases"]["normal-complete-sales"]
+                    )
+                elif quota_competition_case:
+                    selected_fixture = deepcopy(fixture)
+                    contract_number = self.fixtures["contracts"][
+                        case["contract_fixture"]
+                    ]["number"]
+                    for round_calls in selected_fixture.get("rounds", []):
+                        for call in round_calls:
+                            if call.get("name") == "get_contract":
+                                call["arguments"]["contract_number"] = contract_number
+                fixture_runs += 1
+                return FixtureModelClient(case_id=case["id"], fixture=selected_fixture)
+
+            return await self._execute_task(
+                case,
+                model_client_factory=model_client_factory,
+                model_execution_mode="OFFLINE",
+            )
+        return await self._execute_task(
+            case, model_client_factory=None, model_execution_mode="LIVE"
+        )
+
+    async def _execute_file_case(self, case: dict) -> dict:
+        """用真实附件上传/导入接口执行固定文件输入，不伪装成 Agent 任务。"""
+        fixture_id = case["input"].get("fixture_id")
+        fixture = self.file_fixtures.get(fixture_id)
+        if not isinstance(fixture, dict):
+            raise CaseSkipped("EVAL_FILE_FIXTURE_UNAVAILABLE")
+
+        fixture_root = Path(__file__).resolve().parent / "fixtures/v1"
+        path = (fixture_root / fixture["path"]).resolve()
+        if not path.is_relative_to(fixture_root.resolve()) or not path.is_file():
+            raise ValueError("评测文件夹具路径无效")
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != fixture.get("sha256"):
+            raise ValueError("评测文件夹具摘要与索引不一致")
+
+        from app.database import async_session_factory
+        from app.models import Order, QuotaOccupation, TaskApproval
+
+        counts_before = await self._business_side_effect_counts(
+            async_session_factory, Order, TaskApproval, QuotaOccupation
+        )
+        actor = await self._seed_file_eval_operator(async_session_factory)
+        async with httpx.AsyncClient(
+            base_url=self.api_url,
+            timeout=httpx.Timeout(self.settings.model_timeout_seconds + 30),
+            headers={"Origin": self.settings.app_origin or "http://localhost"},
+        ) as client:
+            response = await client.post(
+                "/api/v1/auth/login",
+                json={
+                    "login": actor["login"],
+                    "password": self.settings.demo_password.get_secret_value(),
+                },
+            )
+            response.raise_for_status()
+            client.headers["X-CSRF-Token"] = response.json()["data"]["csrf_token"]
+
+            parse_intent = (
+                "order_xlsx" if fixture_id == "mixed_batch" else "contract_pdf"
+            )
+            upload_response = await client.post(
+                "/api/v1/artifacts",
+                data={"parse_intent": parse_intent},
+                files={
+                    "file": (
+                        path.name,
+                        content,
+                        fixture["media_type"],
+                    )
+                },
+            )
+            upload_status = upload_response.status_code
+            upload_payload = upload_response.json()
+            upload_error = upload_payload.get("error", upload_payload.get("detail"))
+            if not isinstance(upload_error, dict):
+                upload_error = {}
+            artifact_data = upload_payload.get("data")
+            artifact_data = artifact_data if isinstance(artifact_data, dict) else {}
+
+            preview_data: dict = {}
+            if fixture_id == "mixed_batch":
+                upload_response.raise_for_status()
+                artifact_id = artifact_data.get("artifact_id")
+                if not isinstance(artifact_id, str):
+                    raise RuntimeError("XLSX 上传响应缺少附件 ID")
+                preview_response = await client.post(
+                    "/api/v1/imports/preview", json={"artifact_id": artifact_id}
+                )
+                preview_response.raise_for_status()
+                preview_data = preview_response.json()["data"]
+
+        counts_after = await self._business_side_effect_counts(
+            async_session_factory, Order, TaskApproval, QuotaOccupation
+        )
+        group_rows = {
+            str(group["group_id"]): list(group.get("rows", []))
+            for group in preview_data.get("groups", [])
+        }
+        group_ids_by_status = {
+            status: sorted(
+                str(group["group_id"])
+                for group in preview_data.get("groups", [])
+                if group.get("status") == status
+            )
+            for status in ("READY_FOR_REVIEW", "NEEDS_CORRECTION", "OVER_QUOTA_REVIEW")
+        }
+        return {
+            "artifact": {
+                "fixture_id": fixture_id,
+                "media_type": fixture["media_type"],
+                "sha256": digest,
+                "upload_status_code": upload_status,
+                "upload_error_code": upload_error.get("code"),
+                "state": artifact_data.get("state"),
+            },
+            "preview": {
+                "summary": preview_data.get("summary", {}),
+                "fields": {
+                    "group_rows": group_rows,
+                    "ready_group_ids": group_ids_by_status["READY_FOR_REVIEW"],
+                    "needs_correction_group_ids": group_ids_by_status[
+                        "NEEDS_CORRECTION"
+                    ],
+                    "over_quota_group_ids": group_ids_by_status["OVER_QUOTA_REVIEW"],
+                },
+            },
+            "trace": {"model_tool_names": []},
+            "database": {
+                "orders": counts_after["orders"] - counts_before["orders"],
+                "approvals": counts_after["approvals"] - counts_before["approvals"],
+                "quota_occupations": counts_after["quota_occupations"]
+                - counts_before["quota_occupations"],
+                "occupied_amount_delta": format(
+                    counts_after["occupied_amount"] - counts_before["occupied_amount"],
+                    ".2f",
+                ),
+            },
+        }
+
+    @staticmethod
+    async def _business_side_effect_counts(
+        session_factory, Order, TaskApproval, QuotaOccupation
+    ) -> dict[str, int | Decimal]:
+        """记录文件解析前后业务副作用计数，不把附件与审计记录当作订单副作用。"""
+        async with session_factory() as session:
+            return {
+                "orders": int(
+                    await session.scalar(select(func.count()).select_from(Order)) or 0
+                ),
+                "approvals": int(
+                    await session.scalar(select(func.count()).select_from(TaskApproval))
+                    or 0
+                ),
+                "quota_occupations": int(
+                    await session.scalar(
+                        select(func.count()).select_from(QuotaOccupation)
+                    )
+                    or 0
+                ),
+                "occupied_amount": Decimal(
+                    str(
+                        await session.scalar(
+                            select(func.coalesce(func.sum(QuotaOccupation.amount), 0))
+                        )
+                        or 0
+                    )
+                ),
+            }
+
+    async def _seed_file_eval_operator(self, session_factory) -> dict[str, str]:
+        """建立仅供隔离文件案例使用的最小操作员身份。"""
+        from app.auth.context import BUSINESS_OPERATOR
+        from app.auth.passwords import hash_password
+        from app.models import Department, User, UserDepartmentScope, UserRole
+
+        actor_id = uuid5(NAMESPACE_URL, "tradepilot-eval:file-operator-north")
+        login = "demo-eval-file-operator-north"
+        password = self.settings.demo_password
+        if password is None:
+            raise ValueError("隔离演示账号密码未配置")
+        async with session_factory() as session, session.begin():
+            department = await session.scalar(
+                select(Department).where(Department.code == "TP-DEMO-NORTH")
+            )
+            if department is None:
+                raise ValueError("隔离数据库缺少北区部门")
+            user = await session.get(User, actor_id)
+            if user is None:
+                user = User(
+                    id=actor_id,
+                    login=login,
+                    password_hash=hash_password(password.get_secret_value()),
+                    department_id=department.id,
+                    active=True,
+                )
+                session.add(user)
+            else:
+                user.login = login
+                user.password_hash = hash_password(password.get_secret_value())
+                user.department_id = department.id
+                user.active = True
+            if await session.get(UserRole, (actor_id, BUSINESS_OPERATOR)) is None:
+                session.add(UserRole(user_id=actor_id, role=BUSINESS_OPERATOR))
+            scope_key = (actor_id, department.id)
+            if await session.get(UserDepartmentScope, scope_key) is None:
+                session.add(
+                    UserDepartmentScope(user_id=actor_id, department_id=department.id)
+                )
+            department.active = True
+            await session.flush()
+        return {"login": login}
+
+    async def _execute_task(
+        self, case: dict, *, model_client_factory, model_execution_mode: str
+    ) -> dict:
+        actions = [action.get("kind") for action in case.get("actions", [])]
+        duplicate_replay_case = case.get("id") == "duplicate-same-key" and actions == [
+            "create_task",
+            "human_approve_current_version",
+            "commit_once",
+            "replay_same_approved_command",
+        ]
+        stale_approval_case = case.get(
+            "id"
+        ) == "unauthorized-old-approval" and actions == [
+            "create_task",
+            "submit_approval",
+            "edit_draft",
+            "replay_stale_approval",
+        ]
+        stale_commit_case = case.get(
+            "id"
+        ) == "duplicate-commit-stale-approval" and actions == [
+            "edit_draft",
+            "commit_old_approval",
+        ]
+        recovery_approval_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-approval" and actions == [
+            "restart_worker",
+            "resume_task",
+        ]
+        recovery_input_case = case.get(
+            "id"
+        ) == "special-recovery-waiting-input" and actions == [
+            "restart_worker",
+            "resume_task",
+            "provide_input_once",
+        ]
+        duplicate_double_click_case = case.get(
+            "id"
+        ) == "duplicate-double-click" and actions == ["concurrent_commit"]
+        duplicate_draft_replay_case = case.get("id") == "duplicate-draft-replay"
+        lost_commit_response_case = case.get("id") in {
+            "duplicate-lost-response",
+            "special-unknown-commit",
+        }
+        concurrent_commit_case = case.get("id") == "special-concurrency-idempotency"
+        commit_payload_conflict_case = (
+            case.get("id") == "duplicate-key-payload-conflict"
+        )
+        quota_competition_case = case.get("id") == "special-concurrency-quota"
+        from app.database import async_session_factory, engine
+        from app.models import (
+            AgentTask,
+            ConfigSnapshot,
+            Contract,
+            ContractBalance,
+            ContractLine,
+            ContractLineBalance,
+            Customer,
+            Department,
+            Draft,
+            DraftItem,
+            FieldEvidence,
+            Material,
+            Order,
+            QuotaOccupation,
+            RuntimeConfigSecret,
+            TaskApproval,
+            TaskCommand,
+            TraceSpan,
+            User,
+            UserDepartmentScope,
+            UserRole,
+        )
+        from app.runtime_config import content_hash
+        from app.worker.queue import PersistentTaskWorker
+        from app.worker.workflow import create_run_task_handler
+
+        password = self.settings.demo_password
+        if password is None or not password.get_secret_value():
+            raise ValueError("隔离演示账号密码未配置")
+        actor_fixture_id = case.get("setup_actor_fixture") or case["actor_fixture"]
+        actor = self.fixtures["actors"].get(actor_fixture_id)
+        review_actor = dict(self.fixtures["actors"].get(case["actor_fixture"], {}))
+        contract_fixture = self.fixtures["contracts"].get(case["contract_fixture"])
+        if not isinstance(actor, dict) or not isinstance(contract_fixture, dict):
+            raise TypeError("案例引用的账号或合同夹具不存在")
+        if actor.get("role") not in {"operator", "admin"}:
+            raise CaseSkipped("EVAL_ACTION_REQUIRES_HUMAN_APPROVER")
+        order_type = contract_fixture["direction"].upper()
+        input_text = case["input"].get("value")
+        if not isinstance(input_text, str) or not input_text.strip():
+            raise ValueError("在线案例缺少文本输入")
+
+        headers = {"Origin": self.settings.app_origin or "http://localhost"}
+        action_error_code = None
+        action_status_code = None
+        same_order_id_on_replay = None
+        duplicate_draft_replay_matches = None
+        competition_task_ids = []
+        worker_restarted = False
+        async with httpx.AsyncClient(
+            base_url=self.api_url,
+            timeout=httpx.Timeout(self.settings.model_timeout_seconds + 30),
+            headers=headers,
+        ) as client:
+            health = await client.get("/health/ready")
+            health.raise_for_status()
+            login_response = await client.post(
+                "/api/v1/auth/login",
+                json={"login": actor["login"], "password": password.get_secret_value()},
+            )
+            login_response.raise_for_status()
+            login_data = login_response.json()["data"]
+            client.headers["X-CSRF-Token"] = login_data["csrf_token"]
+
+            contract_number = contract_fixture["number"]
+            async with async_session_factory() as session:
+                extra_customer_ids = case.get("customer_fixtures", [])
+                for customer_fixture_id in extra_customer_ids:
+                    customer_fixture = self.fixtures.get("customers", {}).get(
+                        customer_fixture_id
+                    )
+                    if not isinstance(customer_fixture, dict):
+                        raise TypeError("案例引用了不存在的客户夹具")
+                    department = await session.scalar(
+                        select(Department).where(
+                            Department.code
+                            == f"TP-DEMO-{customer_fixture['department'].upper()}"
+                        )
+                    )
+                    if department is None:
+                        raise ValueError("隔离数据库缺少客户夹具所属部门")
+                    customer = await session.scalar(
+                        select(Customer).where(
+                            Customer.department_id == department.id,
+                            Customer.code == customer_fixture["code"],
+                        )
+                    )
+                    if customer is None:
+                        session.add(
+                            Customer(
+                                id=uuid5(
+                                    NAMESPACE_URL,
+                                    f"tradepilot-eval:{customer_fixture_id}:customer",
+                                ),
+                                code=customer_fixture["code"],
+                                name=customer_fixture["name"],
+                                department_id=department.id,
+                                contact=customer_fixture.get("contact"),
+                                address=customer_fixture.get("address"),
+                                active=customer_fixture.get("active", True),
+                            )
+                        )
+                if extra_customer_ids:
+                    await session.commit()
+                if actions == ["attempt_approve"]:
+                    review_actor = await self._seed_wrong_department_approver(
+                        session,
+                        review_actor,
+                        User=User,
+                        UserRole=UserRole,
+                        UserDepartmentScope=UserDepartmentScope,
+                        Department=Department,
+                    )
+                    await session.commit()
+                contract = await session.scalar(
+                    select(Contract).where(Contract.number == contract_number)
+                )
+                if contract is None:
+                    contract = await self._seed_contract_fixture(
+                        session,
+                        case["contract_fixture"],
+                        contract_fixture,
+                        Contract=Contract,
+                        ContractLine=ContractLine,
+                        ContractBalance=ContractBalance,
+                        ContractLineBalance=ContractLineBalance,
+                        Material=Material,
+                    )
+                balance = await session.get(ContractBalance, contract.id)
+                occupied_before = (
+                    balance.occupied_amount if balance is not None else Decimal("0.00")
+                )
+
+            create_response = await client.post(
+                "/api/v1/tasks",
+                headers={"Idempotency-Key": f"eval-{uuid4().hex}"},
+                json={"order_type": order_type, "input": {"text": input_text}},
+            )
+            create_response.raise_for_status()
+            task_id = create_response.json()["data"]["task_id"]
+            command_id = create_response.json()["data"]["command_id"]
+
+            # API 使用当前时钟建任务；仅在隔离库内把 START 命令固定到清单时钟。
+            fixed_time = datetime.fromisoformat(case["fixed_time"])
+            from uuid import UUID
+
+            task_uuid = UUID(task_id)
+            competition_task_ids = [task_uuid]
+            async with async_session_factory() as session, session.begin():
+                command = await session.get(TaskCommand, UUID(command_id))
+                if command is None or command.task_id != task_uuid:
+                    raise RuntimeError("API 已接受任务，但找不到对应 START 命令")
+                command.payload = {
+                    **command.payload,
+                    "input_at": fixed_time.isoformat(),
+                }
+                if case.get("simulate_mcp_unavailable") is True:
+                    # 配置快照可能被多个任务共用；复制快照和密钥引用，只让当前任务绑定故障地址。
+                    task_row = await session.get(AgentTask, task_uuid)
+                    if task_row is None or task_row.config_snapshot_id is None:
+                        raise RuntimeError("MCP 故障注入案例缺少任务配置快照")
+                    snapshot = await session.get(
+                        ConfigSnapshot, task_row.config_snapshot_id
+                    )
+                    if snapshot is None:
+                        raise RuntimeError("MCP 故障注入案例的配置快照不存在")
+                    snapshot_content = {
+                        **snapshot.content,
+                        "mcp_url": "http://127.0.0.1:1/mcp",
+                    }
+                    max_version = await session.scalar(
+                        select(func.max(ConfigSnapshot.version))
+                    )
+                    isolated_snapshot = ConfigSnapshot(
+                        id=uuid4(),
+                        version=int(max_version or 0) + 1,
+                        content=snapshot_content,
+                        content_hash=content_hash(snapshot_content),
+                        created_by=snapshot.created_by,
+                        is_current=False,
+                    )
+                    session.add(isolated_snapshot)
+                    await session.flush()
+                    task_row.config_snapshot_id = isolated_snapshot.id
+                    secret_rows = list(
+                        (
+                            await session.scalars(
+                                select(RuntimeConfigSecret).where(
+                                    RuntimeConfigSecret.snapshot_id == snapshot.id
+                                )
+                            )
+                        ).all()
+                    )
+                    session.add_all(
+                        RuntimeConfigSecret(
+                            id=uuid4(),
+                            snapshot_id=isolated_snapshot.id,
+                            name=secret.name,
+                            ciphertext=secret.ciphertext,
+                            cleared=secret.cleared,
+                        )
+                        for secret in secret_rows
+                    )
+
+            handler = await create_run_task_handler(
+                session_factory=async_session_factory,
+                config=self.settings,
+                model_client_factory=model_client_factory,
+                model_execution_mode=model_execution_mode,
+            )
+            worker = PersistentTaskWorker(
+                engine=engine,
+                session_factory=async_session_factory,
+                handlers={"RUN_TASK": handler},
+                worker_id=f"eval-{uuid4().hex[:20]}",
+                poll_seconds=0.01,
+            )
+            if duplicate_draft_replay_case:
+                from app.agent import function_calling
+
+                original_client = function_calling.MCPToolClient
+                replay_state = {"matches": False, "count": 0}
+
+                class ReplaySameMCPRequest(original_client):
+                    async def call_tool(self, name, arguments, *, context_token):
+                        result = await super().call_tool(
+                            name, arguments, context_token=context_token
+                        )
+                        if name == "save_order_draft" and replay_state["count"] == 0:
+                            replay = await super().call_tool(
+                                name, arguments, context_token=context_token
+                            )
+                            replay_state["matches"] = replay == result
+                            replay_state["count"] += 1
+                        return result
+
+                function_calling.MCPToolClient = ReplaySameMCPRequest
+                try:
+                    worker_ran = await worker.run_once()
+                finally:
+                    function_calling.MCPToolClient = original_client
+                duplicate_draft_replay_matches = replay_state["matches"]
+            else:
+                worker_ran = await worker.run_once()
+            if not worker_ran:
+                raise RuntimeError("隔离评测 Worker 未领取新建任务")
+
+            if stale_approval_case:
+                (
+                    action_error_code,
+                    action_status_code,
+                ) = await self._run_stale_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"],
+                    actions=case["actions"],
+                    worker=worker,
+                )
+            elif stale_commit_case:
+                (
+                    action_error_code,
+                    action_status_code,
+                ) = await self._run_stale_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"],
+                    actions=case["actions"],
+                    worker=worker,
+                    replay_old_approval=False,
+                )
+            elif recovery_approval_case:
+                worker_restarted = await self._verify_waiting_approval_after_restart(
+                    client=client, task_id=task_id, worker=worker
+                )
+            elif recovery_input_case:
+                worker_restarted = await self._resume_waiting_input_after_restart(
+                    client=client, task_id=task_id, worker=worker
+                )
+            elif duplicate_double_click_case:
+                await self._run_concurrent_approval_double_click(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"],
+                    worker=worker,
+                    request_count=int(case["actions"][0].get("requests", 2)),
+                )
+            elif (
+                lost_commit_response_case
+                or concurrent_commit_case
+                or commit_payload_conflict_case
+            ):
+                await self._run_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"]
+                    if actor.get("department") != "all"
+                    else self.fixtures["actors"]["approver_north"],
+                    worker=worker,
+                )
+            elif quota_competition_case:
+                (
+                    competition_task_ids,
+                    blocked_task_id,
+                    action_error_code,
+                ) = await self._run_concurrent_quota_competition(
+                    client=client,
+                    worker=worker,
+                    first_task_id=task_id,
+                    order_type=order_type,
+                    input_text=input_text,
+                    fixed_time=case["fixed_time"],
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"],
+                )
+                task_id = blocked_task_id
+                task_uuid = UUID(blocked_task_id)
+            elif len(actions) > 1 and not duplicate_draft_replay_case:
+                await self._run_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"]
+                    if actor.get("department") != "all"
+                    else self.fixtures["actors"]["admin"],
+                    worker=worker,
+                )
+            elif actions == ["attempt_approve"]:
+                action_error_code, action_status_code = await self._attempt_review_as(
+                    client=client,
+                    task_id=task_id,
+                    approver=review_actor,
+                )
+                # 越权验证会切换到对目标部门无权的账号；恢复任务所有者身份才能读取后置事实。
+                owner_login = await client.post(
+                    "/api/v1/auth/login",
+                    json={
+                        "login": actor["login"],
+                        "password": password.get_secret_value(),
+                    },
+                )
+                owner_login.raise_for_status()
+                client.headers["X-CSRF-Token"] = owner_login.json()["data"][
+                    "csrf_token"
+                ]
+            if duplicate_replay_case or lost_commit_response_case:
+                same_order_id_on_replay = await self._replay_approved_commit(
+                    task_id=task_uuid,
+                    async_session_factory=async_session_factory,
+                )
+            elif concurrent_commit_case:
+                replay_results = await asyncio.gather(
+                    *(
+                        self._replay_approved_commit(
+                            task_id=task_uuid,
+                            async_session_factory=async_session_factory,
+                        )
+                        for _ in range(int(case["actions"][0].get("requests", 8)))
+                    )
+                )
+                same_order_id_on_replay = all(replay_results)
+            elif commit_payload_conflict_case:
+                action_error_code = await self._replay_conflicting_approved_commit(
+                    task_id=task_uuid,
+                    async_session_factory=async_session_factory,
+                )
+
+            task_response = await client.get(f"/api/v1/tasks/{task_id}")
+            task_response.raise_for_status()
+            task_data = task_response.json()["data"]
+            trace_response = await client.get(
+                f"/api/v1/tasks/{task_id}/trace", params={"limit": 100}
+            )
+            trace_response.raise_for_status()
+            trace_data = trace_response.json()["data"]
+
+        async with async_session_factory() as session:
+            orders = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Order)
+                    .where(Order.task_id.in_(competition_task_ids))
+                )
+                or 0
+            )
+            approvals = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(TaskApproval)
+                    .where(TaskApproval.task_id.in_(competition_task_ids))
+                )
+                or 0
+            )
+            occupations = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(QuotaOccupation)
+                    .where(QuotaOccupation.task_id.in_(competition_task_ids))
+                )
+                or 0
+            )
+            task_owner_id = await session.scalar(
+                select(AgentTask.owner_id).where(AgentTask.id == task_uuid)
+            )
+            approval_rows = list(
+                (
+                    await session.scalars(
+                        select(TaskApproval).where(
+                            TaskApproval.task_id.in_(competition_task_ids)
+                        )
+                    )
+                ).all()
+            )
+            invalidated_approvals = sum(
+                row.invalidated_at is not None for row in approval_rows
+            )
+            balance = await session.get(ContractBalance, contract.id)
+            occupied_after = (
+                balance.occupied_amount if balance is not None else Decimal("0.00")
+            )
+            trace_rows = list(
+                (
+                    await session.scalars(
+                        select(TraceSpan)
+                        .where(TraceSpan.task_id == task_uuid)
+                        .order_by(TraceSpan.start_at, TraceSpan.id)
+                    )
+                ).all()
+            )
+            candidate = (task_data.get("draft") or {}).get("candidate") or {}
+            draft = await session.scalar(
+                select(Draft).where(Draft.task_id == task_uuid)
+            )
+            persisted_items = []
+            evidence_rows = []
+            if draft is not None and draft.current_version > 0:
+                persisted_items = list(
+                    (
+                        await session.scalars(
+                            select(DraftItem)
+                            .where(
+                                DraftItem.draft_id == draft.id,
+                                DraftItem.version == draft.current_version,
+                            )
+                            .order_by(DraftItem.line_no)
+                        )
+                    ).all()
+                )
+                evidence_rows = list(
+                    (
+                        await session.scalars(
+                            select(FieldEvidence).where(
+                                FieldEvidence.draft_id == draft.id,
+                                FieldEvidence.version == draft.current_version,
+                            )
+                        )
+                    ).all()
+                )
+            draft_fields = await _normalize_draft_fields(
+                session,
+                candidate,
+                Material,
+                Contract,
+                self.fixtures,
+                persisted_items=persisted_items,
+                evidence_rows=evidence_rows,
+            )
+            if same_order_id_on_replay is not None:
+                draft_fields["same_order_id_on_replay"] = same_order_id_on_replay
+            if duplicate_draft_replay_case:
+                draft_fields["draft_count"] = draft.current_version if draft else 0
+
+        last_error = task_data.get("last_error")
+        return {
+            "task": {
+                "state": task_data["state"],
+                "error_code": last_error.get("code")
+                if isinstance(last_error, dict)
+                else None,
+            },
+            "action": {
+                "error_code": action_error_code,
+                "status_code": action_status_code,
+            },
+            "recovery": {"worker_restarted": worker_restarted},
+            "draft": {
+                "fields": draft_fields,
+                "issues": (task_data.get("draft") or {}).get("issues", []),
+                "validated": (task_data.get("draft") or {}).get("validated"),
+            },
+            "active_wait": task_data.get("active_wait"),
+            "trace": {
+                "model_tool_names": _model_selected_tools(trace_rows),
+                "tool_summaries": _tool_result_summaries(trace_rows),
+                "trace_id": str(trace_rows[0].trace_id) if trace_rows else None,
+                "spans": trace_data.get("spans", []),
+            },
+            "database": {
+                "orders": orders,
+                "approvals": approvals,
+                "invalidated_approvals": invalidated_approvals,
+                "current_draft_version": draft.current_version
+                if draft is not None
+                else 0,
+                "approval_actor_is_distinct": bool(approval_rows)
+                and all(row.actor_id != task_owner_id for row in approval_rows),
+                "same_order_id_on_replay": same_order_id_on_replay,
+                "concurrent_replay_count": len(replay_results)
+                if concurrent_commit_case
+                else None,
+                "duplicate_draft_replay_matches": duplicate_draft_replay_matches,
+                "quota_occupations": occupations,
+                "occupied_amount_delta": f"{occupied_after - occupied_before:.2f}",
+            },
+            "task_id": task_id,
+            "trace_id": str(trace_rows[0].trace_id) if trace_rows else None,
+        }
+
+    async def _seed_contract_fixture(
+        self,
+        session,
+        fixture_id: str,
+        fixture: dict,
+        *,
+        Contract,
+        ContractLine,
+        ContractBalance,
+        ContractLineBalance,
+        Material,
+    ):
+        """只在隔离评测库补齐缺失的合同样本及额度账。"""
+        from app.models import Department
+
+        base_contract = next(
+            (
+                item
+                for item in self.fixtures["contracts"].values()
+                if item["department"] == fixture["department"]
+                and item["direction"] == fixture["direction"]
+                and item["status"] == "active"
+            ),
+            None,
+        )
+        if base_contract is None:
+            raise ValueError("合同夹具没有同部门、同方向的基础合同")
+        base_row = await session.scalar(
+            select(Contract).where(Contract.number == base_contract["number"])
+        )
+        if base_row is None:
+            raise ValueError("隔离数据库缺少合同夹具的基础合同")
+
+        department_code = f"TP-DEMO-{fixture['department'].upper()}"
+        department = await session.scalar(
+            select(Department).where(Department.code == department_code)
+        )
+        if department is None:
+            raise ValueError("隔离数据库缺少合同夹具所属部门")
+        line_fixtures = fixture.get("lines")
+        if line_fixtures is None:
+            line_fixtures = [fixture.get("line")]
+        if (
+            not isinstance(line_fixtures, list)
+            or not line_fixtures
+            or any(not isinstance(item, dict) for item in line_fixtures)
+        ):
+            raise TypeError("合同夹具缺少有效合同明细")
+
+        contract_id = uuid5(NAMESPACE_URL, f"tradepilot-eval:{fixture_id}:contract")
+        contract = Contract(
+            id=contract_id,
+            number=fixture["number"],
+            department_id=department.id,
+            type=fixture["direction"].upper(),
+            customer_id=base_row.customer_id,
+            project_id=base_row.project_id,
+            currency="CNY",
+            total_amount=Decimal(
+                str(
+                    fixture.get("total_amount")
+                    or fixture.get("remaining_amount")
+                    or base_row.total_amount
+                )
+            ),
+            status=fixture["status"].upper(),
+            valid_from=date.fromisoformat(
+                fixture.get("valid_from", base_row.valid_from.isoformat())
+            ),
+            valid_to=date.fromisoformat(
+                fixture.get("valid_to", base_row.valid_to.isoformat())
+            ),
+            version=1,
+        )
+        session.add(contract)
+        await session.flush()
+        lines = []
+        line_balances = []
+        for index, line_fixture in enumerate(line_fixtures):
+            material_fixture = next(
+                (
+                    item
+                    for item in self.fixtures.get("materials", [])
+                    if item.get("id") == line_fixture.get("material_id")
+                ),
+                None,
+            )
+            if material_fixture is None:
+                raise ValueError("合同夹具引用了不存在的物料")
+            material = await session.scalar(
+                select(Material).where(Material.code == material_fixture["source_code"])
+            )
+            if material is None:
+                raise ValueError("隔离数据库缺少合同夹具引用的物料")
+            # get_contract 按明细主键排序；隔离夹具主键按输入序号递增，保证明细顺序稳定。
+            line_id = UUID(int=contract_id.int + index + 1)
+            lines.append(
+                ContractLine(
+                    id=line_id,
+                    contract_id=contract.id,
+                    material_id=material.id,
+                    unit=line_fixture.get("unit") or material.unit,
+                    unit_price=(
+                        Decimal(str(line_fixture["price"]))
+                        if line_fixture.get("price") is not None
+                        else None
+                    ),
+                    max_quantity=(
+                        Decimal(str(line_fixture["max_quantity"]))
+                        if line_fixture.get("max_quantity") is not None
+                        else None
+                    ),
+                )
+            )
+            line_balances.append(
+                ContractLineBalance(
+                    contract_line_id=line_id,
+                    occupied_quantity=Decimal("0.000000"),
+                )
+            )
+        session.add_all(
+            [
+                *lines,
+                ContractBalance(
+                    contract_id=contract.id,
+                    occupied_amount=Decimal("0.00"),
+                    occupied_order_count=0,
+                    version=0,
+                ),
+                *line_balances,
+            ]
+        )
+        await session.flush()
+        # 先提交隔离主数据，确保后续 API 与 MCP 请求看到同一组可复用夹具。
+        await session.commit()
+        return contract
+
+    async def _run_approval_actions(
+        self, *, client, task_id, approver, worker, run_worker: bool = True
+    ) -> None:
+        """由独立授权用户正式审批，再恢复真实 Worker。"""
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        task_response.raise_for_status()
+        task = task_response.json()["data"]
+        active_wait = task.get("active_wait")
+        if task.get("state") != "WAITING_APPROVAL" or not isinstance(active_wait, dict):
+            raise RuntimeError("当前案例没有可供人工批准的活动等待点")
+        required_wait_fields = (
+            "draft_version",
+            "content_hash",
+            "checkpoint_id",
+            "interrupt_id",
+        )
+        if any(not active_wait.get(field) for field in required_wait_fields):
+            raise RuntimeError("人工审批等待点缺少版本绑定信息")
+
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        login_response.raise_for_status()
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        review_response = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": f"eval-review-{uuid4().hex}"},
+            json={
+                "decision": "APPROVE",
+                "draft_version": active_wait["draft_version"],
+                "content_hash": active_wait["content_hash"],
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+            },
+        )
+        review_response.raise_for_status()
+        if run_worker and not await worker.run_once():
+            raise RuntimeError("人工审批后隔离 Worker 未领取恢复作业")
+
+    async def _run_concurrent_quota_competition(
+        self,
+        *,
+        client,
+        worker,
+        first_task_id: str,
+        order_type: str,
+        input_text: str,
+        fixed_time: str,
+        approver: dict,
+    ) -> tuple[list[UUID], str, str]:
+        """先准备两笔合同额度相同的待批订单，再并发争抢最终提交额度。"""
+        from app.database import async_session_factory
+        from app.models import TaskCommand
+
+        create_response = await client.post(
+            "/api/v1/tasks",
+            headers={"Idempotency-Key": f"eval-quota-race-{uuid4().hex}"},
+            json={"order_type": order_type, "input": {"text": input_text}},
+        )
+        create_response.raise_for_status()
+        second_task_id = create_response.json()["data"]["task_id"]
+        second_command_id = UUID(create_response.json()["data"]["command_id"])
+        async with async_session_factory() as session, session.begin():
+            command = await session.get(TaskCommand, second_command_id)
+            if command is None:
+                raise RuntimeError("第二笔并发订单缺少 START 命令")
+            command.payload = {
+                **command.payload,
+                "input_at": datetime.fromisoformat(fixed_time).isoformat(),
+            }
+        if not await worker.run_once():
+            raise QuotaRaceSecondTaskError("隔离 Worker 未处理第二笔并发订单")
+        task_ids = [first_task_id, second_task_id]
+        for task_id in task_ids:
+            task_response = await client.get(f"/api/v1/tasks/{task_id}")
+            task_response.raise_for_status()
+            task = task_response.json()["data"]
+            if task.get("state") != "WAITING_APPROVAL":
+                raise QuotaRaceSecondTaskError("额度并发案例的两笔草稿都应先等待审批")
+            await self._run_approval_actions(
+                client=client,
+                task_id=task_id,
+                approver=approver,
+                worker=worker,
+                run_worker=False,
+            )
+
+        # 两个独立 Worker 并发领取不同任务，同时竞争同一合同的额度账。
+        from app.worker.queue import PersistentTaskWorker
+
+        competing_worker = PersistentTaskWorker(
+            engine=worker.engine,
+            session_factory=worker.session_factory,
+            handlers=worker.handlers,
+            worker_id=f"eval-quota-race-{uuid4().hex[:16]}",
+            poll_seconds=0.01,
+        )
+        processed = await asyncio.gather(worker.run_once(), competing_worker.run_once())
+        if processed != [True, True]:
+            raise QuotaRaceWorkerClaimError("两个并发 Worker 未分别领取额度竞争作业")
+        states = {}
+        for task_id in task_ids:
+            response = await client.get(f"/api/v1/tasks/{task_id}")
+            response.raise_for_status()
+            states[task_id] = response.json()["data"]
+        blocked = [
+            task_id
+            for task_id, task in states.items()
+            if task.get("state") == "BLOCKED_RULE"
+        ]
+        completed = [
+            task_id
+            for task_id, task in states.items()
+            if task.get("state") == "COMPLETED"
+        ]
+        if len(blocked) != 1 or len(completed) != 1:
+            raise QuotaRaceOutcomeError(
+                {
+                    task_id: {
+                        "state": str(task.get("state")),
+                        "error_code": (task.get("last_error") or {}).get("code"),
+                    }
+                    for task_id, task in states.items()
+                }
+            )
+        async with async_session_factory() as session:
+            blocked_command = await session.scalar(
+                select(TaskCommand)
+                .where(
+                    TaskCommand.task_id == UUID(blocked[0]),
+                    TaskCommand.kind == "REVIEW",
+                )
+                .order_by(TaskCommand.created_at.desc(), TaskCommand.id.desc())
+            )
+            result_ref = blocked_command.result_ref if blocked_command else None
+            block_code = (
+                result_ref.get("code") if isinstance(result_ref, dict) else None
+            )
+        if block_code != "CONTRACT_AMOUNT_EXCEEDED":
+            raise QuotaRaceOutcomeError(
+                {
+                    task_id: {
+                        "state": str(task.get("state")),
+                        "error_code": (task.get("last_error") or {}).get("code"),
+                    }
+                    for task_id, task in states.items()
+                }
+            )
+        return [UUID(value) for value in task_ids], blocked[0], str(block_code)
+
+    async def _run_stale_approval_actions(
+        self,
+        *,
+        client,
+        task_id: str,
+        approver: dict,
+        actions: list[dict],
+        worker,
+        replay_old_approval: bool = True,
+    ) -> tuple[str | None, int | None]:
+        """验证草稿编辑会持久化失效旧审批，并拒绝同一幂等键重放。"""
+
+        def ensure_success(response: httpx.Response, step: str) -> None:
+            if not response.is_success:
+                detail = (
+                    f"{step}失败（HTTP {response.status_code}）：{response.text[:500]}"
+                )
+                print(detail, file=sys.stderr, flush=True)
+                raise RuntimeError(detail)
+
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        ensure_success(task_response, "读取审批任务")
+        active_wait = task_response.json()["data"].get("active_wait")
+        if (
+            not isinstance(active_wait, dict)
+            or task_response.json()["data"].get("state") != "WAITING_APPROVAL"
+        ):
+            raise RuntimeError("旧审批案例没有有效审批等待点")
+
+        key = f"eval-stale-approval-{uuid4().hex}"
+        approval_payload = {
+            "decision": "APPROVE",
+            "draft_version": active_wait["draft_version"],
+            "content_hash": active_wait["content_hash"],
+            "checkpoint_id": active_wait["checkpoint_id"],
+            "interrupt_id": active_wait["interrupt_id"],
+        }
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        ensure_success(login_response, "登录审批人")
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        approval_response = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": key},
+            json=approval_payload,
+        )
+        ensure_success(approval_response, "提交旧版本审批")
+
+        owner = self.fixtures["actors"]["operator_north"]
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": owner["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        ensure_success(login_response, "恢复经办人身份")
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        edit = next(item for item in actions if item["kind"] == "edit_draft")
+        edit_response = await client.patch(
+            f"/api/v1/tasks/{task_id}/draft",
+            headers={"Idempotency-Key": f"eval-edit-stale-approval-{uuid4().hex}"},
+            json={
+                "expected_version": active_wait["draft_version"],
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+                "patch": edit.get("patch", {"delivery_date": "2026-11-02"}),
+                "file_confirmations": [],
+            },
+        )
+        ensure_success(edit_response, "编辑已批准草稿")
+
+        error_code = None
+        status_code = None
+        if replay_old_approval:
+            login_response = await client.post(
+                "/api/v1/auth/login",
+                json={
+                    "login": approver["login"],
+                    "password": self.settings.demo_password.get_secret_value(),
+                },
+            )
+            ensure_success(login_response, "重新登录审批人")
+            client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+            replay = await client.post(
+                f"/api/v1/tasks/{task_id}/review",
+                headers={"Idempotency-Key": key},
+                json=approval_payload,
+            )
+            if replay.status_code != 409:
+                raise RuntimeError(
+                    f"失效审批幂等重放应返回 409，实际为 {replay.status_code}"
+                )
+            replay_payload = replay.json()
+            detail = replay_payload.get("error", replay_payload.get("detail", {}))
+            error_code = detail.get("code") if isinstance(detail, dict) else None
+            status_code = replay.status_code
+        if not await worker.run_once():
+            raise RuntimeError("编辑草稿后隔离 Worker 未领取新输入作业")
+        if not replay_old_approval:
+            from app.database import async_session_factory
+            from app.models import TaskApproval, TaskCommand
+            from app.orders.commit import OrderCommitRejected, commit_approved_order
+
+            try:
+                async with async_session_factory() as session, session.begin():
+                    approval = await session.scalar(
+                        select(TaskApproval)
+                        .where(TaskApproval.task_id == UUID(task_id))
+                        .order_by(TaskApproval.created_at.desc())
+                    )
+                    if approval is None:
+                        raise RuntimeError("旧批准提交案例缺少持久审批记录")
+                    command = await session.get(TaskCommand, approval.command_id)
+                    if command is None:
+                        raise RuntimeError("旧批准提交案例缺少原审批命令")
+                    await commit_approved_order(
+                        session,
+                        task_id=UUID(task_id),
+                        command_id=command.id,
+                        approval_id=approval.id,
+                        config=self.settings,
+                    )
+            except OrderCommitRejected as exc:
+                error_code = (
+                    exc.args[1] if len(exc.args) > 1 else "ORDER_COMMIT_REJECTED"
+                )
+            else:
+                raise RuntimeError("草稿编辑后旧批准仍可提交")
+        return error_code, status_code
+
+    async def _verify_waiting_approval_after_restart(
+        self, *, client, task_id: str, worker
+    ) -> bool:
+        """以新 Worker 实例确认持久化审批等待点可回查且没有残留作业。"""
+        from app.worker.queue import PersistentTaskWorker
+
+        restarted = PersistentTaskWorker(
+            engine=worker.engine,
+            session_factory=worker.session_factory,
+            handlers=worker.handlers,
+            worker_id=f"eval-restart-{uuid4().hex[:16]}",
+            poll_seconds=0.01,
+        )
+        await restarted.recover()
+        if await restarted.run_once():
+            raise RuntimeError("审批等待恢复案例不应存在可执行队列作业")
+        response = await client.get(f"/api/v1/tasks/{task_id}")
+        response.raise_for_status()
+        data = response.json()["data"]
+        active_wait = data.get("active_wait")
+        if (
+            data.get("state") != "WAITING_APPROVAL"
+            or not isinstance(active_wait, dict)
+            or active_wait.get("kind") != "APPROVAL"
+        ):
+            raise RuntimeError("重建 Worker 后审批等待点未能回查")
+        return True
+
+    async def _resume_waiting_input_after_restart(
+        self, *, client, task_id: str, worker
+    ) -> bool:
+        """重建 Worker 后读取输入等待点，接受一次补充并恢复同一任务。"""
+        from app.worker.queue import PersistentTaskWorker
+
+        restarted = PersistentTaskWorker(
+            engine=worker.engine,
+            session_factory=worker.session_factory,
+            handlers=worker.handlers,
+            worker_id=f"eval-restart-{uuid4().hex[:16]}",
+            poll_seconds=0.01,
+        )
+        await restarted.recover()
+        if await restarted.run_once():
+            raise RuntimeError("输入等待恢复案例不应存在可执行队列作业")
+        response = await client.get(f"/api/v1/tasks/{task_id}")
+        response.raise_for_status()
+        data = response.json()["data"]
+        active_wait = data.get("active_wait")
+        if (
+            data.get("state") != "WAITING_INPUT"
+            or not isinstance(active_wait, dict)
+            or active_wait.get("kind") != "INPUT"
+        ):
+            raise RuntimeError("重建 Worker 后输入等待点未能回查")
+        supplement = await client.post(
+            f"/api/v1/tasks/{task_id}/inputs",
+            headers={"Idempotency-Key": f"eval-recovery-input-{uuid4().hex}"},
+            json={
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+                "expected_draft_version": active_wait.get("draft_version"),
+                "text": "规格为 12mm。",
+                "artifact_ids": [],
+            },
+        )
+        supplement.raise_for_status()
+        if not await restarted.run_once():
+            raise RuntimeError("用户补充规格后新 Worker 未领取恢复作业")
+        return True
+
+    async def _run_concurrent_approval_double_click(
+        self, *, client, task_id: str, approver: dict, worker, request_count: int
+    ) -> None:
+        """并发提交相同审批请求，确认 API 幂等收敛后只恢复一次 Worker。"""
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        task_response.raise_for_status()
+        task_data = task_response.json()["data"]
+        active_wait = task_data.get("active_wait")
+        if task_data.get("state") != "WAITING_APPROVAL" or not isinstance(
+            active_wait, dict
+        ):
+            raise RuntimeError("重复点击案例没有有效的审批等待点")
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        login_response.raise_for_status()
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        payload = {
+            "decision": "APPROVE",
+            "draft_version": active_wait["draft_version"],
+            "content_hash": active_wait["content_hash"],
+            "checkpoint_id": active_wait["checkpoint_id"],
+            "interrupt_id": active_wait["interrupt_id"],
+        }
+        key = f"eval-double-click-{uuid4().hex}"
+
+        async def submit_review():
+            return await client.post(
+                f"/api/v1/tasks/{task_id}/review",
+                headers={"Idempotency-Key": key},
+                json=payload,
+            )
+
+        responses = await asyncio.gather(
+            *(submit_review() for _ in range(request_count))
+        )
+        if any(response.status_code != 202 for response in responses):
+            codes = [response.status_code for response in responses]
+            raise RuntimeError(f"重复审批请求未幂等接受，HTTP 状态：{codes}")
+        if not await worker.run_once():
+            raise RuntimeError("重复审批请求后隔离 Worker 未领取作业")
+
+    async def _seed_wrong_department_approver(
+        self,
+        session,
+        actor: dict,
+        *,
+        User,
+        UserRole,
+        UserDepartmentScope,
+        Department,
+    ) -> dict:
+        """在隔离库创建最小跨部门审批身份，避免扩大常规演示账号权限。"""
+        from app.auth.passwords import hash_password
+
+        department = await session.scalar(
+            select(Department).where(Department.code == "TP-DEMO-SOUTH")
+        )
+        if department is None:
+            raise ValueError("隔离数据库缺少南区部门")
+        login = "demo-eval-approver-south"
+        user_id = uuid5(NAMESPACE_URL, "tradepilot-eval:approver-south")
+        user = await session.get(User, user_id)
+        if user is None:
+            password = self.settings.demo_password
+            if password is None:
+                raise ValueError("隔离演示账号密码未配置")
+            session.add_all(
+                [
+                    User(
+                        id=user_id,
+                        login=login,
+                        password_hash=hash_password(password.get_secret_value()),
+                        department_id=department.id,
+                        active=True,
+                    ),
+                    UserRole(user_id=user_id, role="business_approver"),
+                    UserDepartmentScope(user_id=user_id, department_id=department.id),
+                ]
+            )
+            await session.flush()
+        return {**actor, "login": login}
+
+    async def _replay_approved_commit(self, *, task_id, async_session_factory) -> bool:
+        """复用同一持久审批命令重试事务提交，确认只回放原订单和额度占用。"""
+        from app.models import Order, TaskApproval
+        from app.orders.commit import commit_approved_order
+
+        async with async_session_factory() as session, session.begin():
+            approval = await session.scalar(
+                select(TaskApproval)
+                .where(
+                    TaskApproval.task_id == task_id,
+                    TaskApproval.decision == "APPROVE",
+                )
+                .order_by(TaskApproval.created_at.desc(), TaskApproval.id.desc())
+            )
+            original_order_id = await session.scalar(
+                select(Order.id).where(Order.task_id == task_id)
+            )
+            if approval is None or original_order_id is None:
+                raise RuntimeError("幂等重放案例缺少已批准订单的持久事实")
+            result = await commit_approved_order(
+                session,
+                task_id=task_id,
+                command_id=approval.command_id,
+                approval_id=approval.id,
+                config=self.settings,
+            )
+            return result.replayed and result.order_id == original_order_id
+
+    async def _replay_conflicting_approved_commit(
+        self, *, task_id, async_session_factory
+    ) -> str:
+        """用隔离 savepoint 改动审批绑定，再确认订单提交拒绝幂等冲突。"""
+        from app.models import TaskApproval, TaskCommand
+        from app.orders.commit import OrderCommitRejected, commit_approved_order
+
+        class RollbackConflictProbe(Exception):
+            pass
+
+        code = None
+        async with async_session_factory() as session, session.begin():
+            approval = await session.scalar(
+                select(TaskApproval)
+                .where(
+                    TaskApproval.task_id == task_id,
+                    TaskApproval.decision == "APPROVE",
+                )
+                .order_by(TaskApproval.created_at.desc(), TaskApproval.id.desc())
+            )
+            if approval is None:
+                raise RuntimeError("幂等冲突案例缺少已批准快照")
+            command = await session.get(TaskCommand, approval.command_id)
+            if command is None:
+                raise RuntimeError("幂等冲突案例缺少持久审批命令")
+            try:
+                async with session.begin_nested():
+                    command.payload = {**command.payload, "content_hash": "冲突内容"}
+                    await session.flush()
+                    try:
+                        await commit_approved_order(
+                            session,
+                            task_id=task_id,
+                            command_id=approval.command_id,
+                            approval_id=approval.id,
+                            config=self.settings,
+                        )
+                    except OrderCommitRejected as exc:
+                        code = str(exc.args[1]) if len(exc.args) > 1 else "UNKNOWN"
+                        raise RollbackConflictProbe() from exc
+            except RollbackConflictProbe:
+                pass
+        if code != "ORDER_IDEMPOTENCY_CONFLICT":
+            raise RuntimeError(f"预期订单幂等冲突，实际错误码：{code}")
+        return code
+
+    async def _attempt_review_as(self, *, client, task_id, approver) -> tuple[str, int]:
+        """记录越权审批 API 的真实拒绝；不会伪造任务终态或审批记录。"""
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        task_response.raise_for_status()
+        task = task_response.json()["data"]
+        active_wait = task.get("active_wait")
+        if task.get("state") != "WAITING_APPROVAL" or not isinstance(active_wait, dict):
+            raise RuntimeError("越权审批案例没有有效的审批等待点")
+
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        login_response.raise_for_status()
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        response = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": f"eval-wrong-approver-{uuid4().hex}"},
+            json={
+                "decision": "APPROVE",
+                "draft_version": active_wait["draft_version"],
+                "content_hash": active_wait["content_hash"],
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+            },
+        )
+        if response.status_code != 404:
+            raise RuntimeError(f"越权审批应返回 404，实际为 {response.status_code}")
+        payload = response.json()
+        error = payload.get("error")
+        if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+            raise TypeError("越权审批拒绝响应缺少稳定错误码")
+        return error["code"], response.status_code
+
+
+async def _normalize_draft_fields(
+    session,
+    candidate: dict,
+    Material,
+    Contract,
+    fixtures: dict,
+    *,
+    persisted_items=(),
+    evidence_rows=(),
+) -> dict:
+    from uuid import UUID
+
+    fields: dict[str, object] = {}
+    if candidate.get("order_type"):
+        fields["order_type"] = candidate["order_type"].lower()
+    contract_id = candidate.get("contract_id")
+    if contract_id:
+        contract = await session.get(Contract, UUID(contract_id))
+        if contract is not None:
+            fields["contract_number"] = contract.number
+    items = persisted_items or candidate.get("items") or []
+    fields["line_count"] = len(items)
+    fields["line_material_ids"] = []
+    fields["line_details"] = []
+    for line_item in items:
+        get_line_value = (
+            (lambda key, item=line_item: getattr(item, key))
+            if not isinstance(line_item, dict)
+            else (lambda key, item=line_item: item.get(key))
+        )
+        material_id = get_line_value("material_id")
+        material = (
+            await session.get(
+                Material,
+                UUID(str(material_id))
+                if not isinstance(material_id, UUID)
+                else material_id,
+            )
+            if material_id
+            else None
+        )
+        fixture_material = next(
+            (
+                entry
+                for entry in fixtures.get("materials", [])
+                if material is not None and entry.get("source_code") == material.code
+            ),
+            None,
+        )
+        fields["line_material_ids"].append(
+            fixture_material["id"] if fixture_material else None
+        )
+        detail = {
+            "material_id": fixture_material["id"]
+            if fixture_material
+            else material.code
+            if material
+            else None
+        }
+        for source in ("quantity", "unit_price", "amount"):
+            value = get_line_value(source)
+            if value is not None:
+                decimal_value = Decimal(str(value))
+                places = Decimal("0.001") if source == "quantity" else Decimal("0.01")
+                detail[source] = format(decimal_value.quantize(places), "f")
+        fields["line_details"].append(detail)
+    if items:
+        item = items[0]
+        get_item_value = (
+            (lambda key: getattr(item, key))
+            if not isinstance(item, dict)
+            else (lambda key: item.get(key))
+        )
+        material_id = get_item_value("material_id")
+        if material_id:
+            material = await session.get(
+                Material,
+                UUID(str(material_id))
+                if not isinstance(material_id, UUID)
+                else material_id,
+            )
+            if material is not None:
+                fixture_material = next(
+                    (
+                        item
+                        for item in fixtures.get("materials", [])
+                        if item.get("source_code") == material.code
+                    ),
+                    None,
+                )
+                fields["material_id"] = (
+                    fixture_material["id"] if fixture_material else material.code
+                )
+        for source, target in (
+            ("specification", "spec"),
+            ("quantity", "quantity"),
+            ("unit", "unit"),
+            ("unit_price", "unit_price"),
+        ):
+            if get_item_value(source) is not None:
+                value = get_item_value(source)
+                if target == "spec":
+                    fixture_material = next(
+                        (
+                            material_fixture
+                            for material_fixture in fixtures.get("materials", [])
+                            if material_fixture.get("id") == fields.get("material_id")
+                        ),
+                        None,
+                    )
+                    if (
+                        fixture_material is not None
+                        and fixture_material.get("source_spec") == value
+                    ):
+                        value = fixture_material["spec"]
+                if target == "quantity":
+                    value = format(
+                        Decimal(str(value)).quantize(Decimal("0.001")), ".3f"
+                    )
+                elif target == "unit_price":
+                    value = format(Decimal(str(value)).quantize(Decimal("0.01")), ".2f")
+                fields[target] = value
+        price_evidence = next(
+            (row for row in evidence_rows if row.field_path == "items[0].unit_price"),
+            None,
+        )
+        if (
+            price_evidence is not None
+            and price_evidence.source_type == "MASTER_DATA"
+            and isinstance(price_evidence.locator, dict)
+            and price_evidence.locator.get("contract_line_id")
+        ):
+            fields["price_source"] = "CONTRACT"
+    if isinstance(candidate.get("business_fields"), dict):
+        fields.update(candidate["business_fields"])
+    if candidate.get("delivery_date"):
+        fields["delivery_date"] = candidate["delivery_date"]
+    return fields
+
+
+def create_executor(*, mode: str, manifest: dict, seed: int) -> BackendCaseExecutor:
+    """CLI 默认执行器；所有实际业务副作用都限制在隔离 Compose 数据域。"""
+    return BackendCaseExecutor(mode=mode, manifest=manifest, seed=seed)
+
+
+def _model_selected_tools(trace_rows) -> list[str]:
+    allowed = {
+        "query_customer",
+        "match_material",
+        "get_contract",
+        "check_contract_balance",
+        "save_order_draft",
+    }
+    selected = []
+    for span in trace_rows:
+        if span.kind != "MODEL" or not isinstance(span.output_ref, dict):
+            continue
+        for call in span.output_ref.get("tool_calls", []):
+            if isinstance(call, dict) and call.get("name") in allowed:
+                selected.append(call["name"])
+    return selected
+
+
+def _tool_result_summaries(trace_rows) -> dict[str, dict]:
+    """导出追踪里已有的脱敏工具摘要，供评测断言业务统计结果。"""
+    allowed = {
+        "query_customer",
+        "match_material",
+        "get_contract",
+        "check_contract_balance",
+        "save_order_draft",
+    }
+    summaries = {}
+    for span in trace_rows:
+        output = span.output_ref
+        if span.kind != "TOOL" or not isinstance(output, dict):
+            continue
+        name = output.get("tool")
+        summary = output.get("result_summary")
+        if name in allowed and isinstance(summary, dict):
+            summaries[name] = summary
+    return summaries
+
+
+class FixtureModelClient:
+    """从独立版本化响应夹具回放工具选择，不从 expected 断言构造模型输出。"""
+
+    def __init__(self, *, case_id: str, fixture: dict) -> None:
+        self.case_id = case_id
+        self.fixture = fixture
+        self.round_index = 0
+
+    async def create_response(self, *, instructions, input_items, tools):
+        del instructions, tools
+        from app.agent.model_client import ModelResponse
+
+        error = self.fixture.get("error")
+        if error is not None:
+            from app.agent.model_client import ModelProviderError
+
+            if not isinstance(error, dict):
+                raise ValueError("离线模型错误夹具格式无效")
+            code = error.get("code")
+            retryable = error.get("retryable")
+            attempts = error.get("attempts")
+            if (
+                not isinstance(code, str)
+                or not code.startswith("MODEL_")
+                or not isinstance(retryable, bool)
+                or not isinstance(attempts, int)
+                or isinstance(attempts, bool)
+                or attempts < 1
+            ):
+                raise ValueError("离线模型错误夹具字段无效")
+            raise ModelProviderError(code, retryable=retryable, attempts=attempts)
+
+        rounds = self.fixture.get("rounds", [])
+        if self.round_index < len(rounds):
+            output = tuple(
+                {
+                    "type": "function_call",
+                    "id": f"fc_eval_{self.case_id}_{self.round_index}_{index}",
+                    "call_id": f"call_eval_{self.case_id}_{self.round_index}_{index}",
+                    "name": call["name"],
+                    "arguments": json.dumps(
+                        _resolve_template(call["arguments"], input_items),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ),
+                }
+                for index, call in enumerate(rounds[self.round_index], start=1)
+            )
+            output_text = ""
+        else:
+            output_text = self.fixture.get("final_text", "离线评测案例执行完成。")
+            output = (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": output_text}],
+                },
+            )
+        self.round_index += 1
+        return ModelResponse(
+            response_id=f"eval-{self.case_id}-{self.round_index}",
+            model="offline-fixture-v1",
+            output=output,
+            output_text=output_text,
+            usage=None,
+            attempts=1,
+        )
+
+
+def _resolve_template(value, input_items):
+    call_names = {}
+    outputs = {}
+    for item in input_items:
+        if item.get("type") == "function_call":
+            call_names[item.get("call_id")] = item.get("name")
+        elif item.get("type") == "function_call_output":
+            name = call_names.get(item.get("call_id"))
+            if name:
+                outputs[name] = json.loads(item["output"])
+
+    if isinstance(value, dict) and set(value) == {"$ref"}:
+        resolved = outputs
+        for part in value["$ref"].split("."):
+            resolved = (
+                resolved[int(part)] if isinstance(resolved, list) else resolved[part]
+            )
+        return resolved
+    if isinstance(value, dict):
+        return {
+            key: _resolve_template(item, input_items) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_resolve_template(item, input_items) for item in value]
+    return value

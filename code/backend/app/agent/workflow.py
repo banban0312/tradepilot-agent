@@ -165,6 +165,9 @@ def build_task_graph(
                 raise TypeError("草稿校验服务返回的字段问题缺少说明")
             normalized.append({"field": field, "message": message})
         result_state: WorkflowState = {"missing_fields": normalized}
+        block_reason = result.get("block_reason")
+        if isinstance(block_reason, str) and block_reason:
+            result_state["block_reason"] = block_reason
         if isinstance(draft_id, (str, UUID)):
             result_state["draft_id"] = str(draft_id)
         if isinstance(draft_version, int) and not isinstance(draft_version, bool):

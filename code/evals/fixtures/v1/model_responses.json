@@ -1,0 +1,1344 @@
+{
+  "version": "1.0.0",
+  "description": "离线模型公开响应夹具；与案例预期断言分开维护。",
+  "cases": {
+    "normal-complete-sales": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "2.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": [
+                {
+                  "field_path": "delivery_date",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2026-11-01",
+                  "accepted_value": "2026-11-01"
+                },
+                {
+                  "field_path": "items[0].specification",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "HRB400 12mm",
+                  "accepted_value": "12mm"
+                },
+                {
+                  "field_path": "items[0].quantity",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2吨",
+                  "accepted_value": "2.000"
+                }
+              ]
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已按合同主数据保存并核验销售草稿，等待授权人员审批。"
+    },
+    "normal-multiple-lines": {
+      "rounds": [
+        [
+          { "name": "get_contract", "arguments": { "contract_number": "TP-EVAL-SALES-NORTH-MULTI-01", "order_type": "SALES" } },
+          { "name": "match_material", "arguments": { "raw_name": "螺纹钢", "specification": "12mm", "unit": "吨" } },
+          { "name": "match_material", "arguments": { "raw_name": "Q235钢板", "specification": "8mm", "unit": "吨" } }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": { "$ref": "get_contract.data.id" },
+                "customer_id": { "$ref": "get_contract.data.customer_id" },
+                "project_id": { "$ref": "get_contract.data.project_id" },
+                "contact": "张先生",
+                "delivery_date": "2026-11-01",
+                "address": { "$ref": "get_contract.data.delivery_address" },
+                "items": [
+                  {
+                    "material_id": { "$ref": "get_contract.data.lines.0.material_id" },
+                    "raw_name": { "$ref": "get_contract.data.lines.0.material_name" },
+                    "specification": { "$ref": "get_contract.data.lines.0.specification" },
+                    "quantity": "2.000",
+                    "unit": { "$ref": "get_contract.data.lines.0.unit" },
+                    "unit_price": { "$ref": "get_contract.data.lines.0.unit_price" }
+                  },
+                  {
+                    "material_id": { "$ref": "get_contract.data.lines.1.material_id" },
+                    "raw_name": { "$ref": "get_contract.data.lines.1.material_name" },
+                    "specification": { "$ref": "get_contract.data.lines.1.specification" },
+                    "quantity": "1.000",
+                    "unit": { "$ref": "get_contract.data.lines.1.unit" },
+                    "unit_price": { "$ref": "get_contract.data.lines.1.unit_price" }
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": { "$ref": "get_contract.data.id" },
+              "draft_id": { "$ref": "save_order_draft.data.draft_id" },
+              "draft_version": { "$ref": "save_order_draft.data.version" },
+              "order_amount": { "$ref": "save_order_draft.data.total_amount" }
+            }
+          }
+        ]
+      ],
+      "final_text": "已按合同的两条明细保存并核验销售草稿，等待授权人员审批。"
+    },
+    "abnormal-mcp-unavailable": {
+      "rounds": [],
+      "final_text": "MCP 不可用时不继续处理订单。"
+    },
+    "ambiguity-similar-customer": {
+      "rounds": [
+        [
+          {
+            "name": "query_customer",
+            "arguments": { "name": "华北示例客户", "limit": 10 }
+          }
+        ]
+      ],
+      "final_text": "找到多个相似客户，请先确认具体客户后再继续。"
+    },
+    "normal-complete-purchase": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-PURCHASE-N1",
+              "order_type": "PURCHASE"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "HRB400 16mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "PURCHASE",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-05",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 16mm",
+                    "quantity": "3.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": [
+                {
+                  "field_path": "delivery_date",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2026-11-05",
+                  "accepted_value": "2026-11-05"
+                },
+                {
+                  "field_path": "items[0].specification",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "HRB400 16mm",
+                  "accepted_value": "HRB400 16mm"
+                },
+                {
+                  "field_path": "items[0].quantity",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "3吨",
+                  "accepted_value": "3.000"
+                }
+              ]
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已按采购合同及物料主数据保存草稿并核验额度，等待授权人员审批。"
+    },
+    "normal-price-from-contract": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "get_contract.data.lines.0.material_id"
+                    },
+                    "raw_name": {
+                      "$ref": "get_contract.data.lines.0.material_name"
+                    },
+                    "specification": {
+                      "$ref": "get_contract.data.lines.0.specification"
+                    },
+                    "quantity": "2.000",
+                    "unit": {
+                      "$ref": "get_contract.data.lines.0.unit"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": [
+                {
+                  "field_path": "delivery_date",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2026-11-01",
+                  "accepted_value": "2026-11-01"
+                },
+                {
+                  "field_path": "items[0].quantity",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2吨",
+                  "accepted_value": "2.000"
+                }
+              ]
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已保留合同配置单价及其来源，并完成额度核验。"
+    },
+    "normal-approved-order": {
+      "extends": "normal-complete-sales",
+      "final_text": "已保存并核验草稿，后续需由授权审批人批准。"
+    },
+    "quota-over": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-EVAL-SALES-NORTH-01",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "测试联系人",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "4.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已检测到订单金额超过合同剩余额度。"
+    },
+    "quota-inactive-contract": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-INACTIVE",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "测试联系人",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "2.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "合同已停用，不能继续创建订单。"
+    },
+    "unauthorized-prompt-injection": {
+      "extends": "normal-complete-sales",
+      "final_text": "订单草稿已保存，仍需授权审批人批准。"
+    },
+    "unauthorized-role-claim": {
+      "extends": "normal-complete-sales",
+      "final_text": "输入中的角色声明不改变当前认证身份，订单仍需授权审批。"
+    },
+    "unauthorized-cross-department": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          }
+        ]
+      ],
+      "final_text": "无法查询该部门合同。"
+    },
+    "abnormal-tool-type": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": {
+                      "amount": "2"
+                    },
+                    "unit": "吨"
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ]
+      ],
+      "final_text": "工具参数类型错误，应停止当前任务且不能保存草稿。"
+    },
+    "abnormal-past-delivery": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-10-15",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "2.000",
+                    "unit": "吨"
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ]
+      ],
+      "final_text": "交期早于业务日期，不能继续办理。"
+    },
+    "abnormal-missing-quantity": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "unit": "吨"
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ]
+      ],
+      "final_text": "数量缺失，需要等待用户补充后再继续。"
+    },
+    "abnormal-model-timeout": {
+      "error": {
+        "code": "MODEL_TIMEOUT",
+        "retryable": true,
+        "attempts": 3
+      }
+    },
+    "ambiguity-missing-spec": {
+      "rounds": [
+        [
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400"
+            }
+          }
+        ]
+      ],
+      "final_text": "有多个规格候选，需要用户明确直径规格。"
+    },
+    "quota-equal": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-EVAL-SALES-NORTH-EQUAL-01",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "测试联系人",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "2.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已检测到订单金额超过合同剩余额度。"
+    },
+    "quota-over-by-cent": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-EVAL-SALES-NORTH-CENT-01",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "测试联系人",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "1.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已检测到订单金额超过合同剩余额度。"
+    },
+    "quota-note-no-bypass": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-EVAL-SALES-NORTH-NOTE-01",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "HRB400",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "测试联系人",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "4.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": []
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已检测到订单金额超过合同剩余额度。"
+    },
+    "quota-purchase-isolated": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-PURCHASE-N1",
+              "order_type": "PURCHASE"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "HRB400 16mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "PURCHASE",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-05",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 16mm",
+                    "quantity": "3.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": [
+                {
+                  "field_path": "delivery_date",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2026-11-05",
+                  "accepted_value": "2026-11-05"
+                },
+                {
+                  "field_path": "items[0].specification",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "HRB400 16mm",
+                  "accepted_value": "HRB400 16mm"
+                },
+                {
+                  "field_path": "items[0].quantity",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "3吨",
+                  "accepted_value": "3.000"
+                }
+              ]
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "已按采购合同及物料主数据保存草稿并核验额度，等待授权人员审批。"
+    },
+    "ambiguity-material-alias": {
+      "rounds": [
+        [
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢"
+            }
+          }
+        ]
+      ],
+      "final_text": "有多个规格候选，需要用户明确直径规格。"
+    },
+    "ambiguity-missing-date": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "match_material.data.candidates.0.material_id"
+                    },
+                    "raw_name": "螺纹钢",
+                    "specification": "HRB400 12mm",
+                    "quantity": "2.000",
+                    "unit": "吨",
+                    "unit_price": {
+                      "$ref": "get_contract.data.lines.0.unit_price"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": [
+                {
+                  "field_path": "items[0].specification",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "HRB400 12mm",
+                  "accepted_value": "12mm"
+                },
+                {
+                  "field_path": "items[0].quantity",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2吨",
+                  "accepted_value": "2.000"
+                }
+              ]
+            }
+          }
+        ],
+        [
+          {
+            "name": "check_contract_balance",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "draft_id": {
+                "$ref": "save_order_draft.data.draft_id"
+              },
+              "draft_version": {
+                "$ref": "save_order_draft.data.version"
+              },
+              "order_amount": {
+                "$ref": "save_order_draft.data.total_amount"
+              }
+            }
+          }
+        ]
+      ],
+      "final_text": "订单缺少交期，请补充后继续。"
+    },
+    "ambiguity-missing-price": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-S1",
+              "order_type": "SALES"
+            }
+          }
+        ],
+        [
+          {
+            "name": "save_order_draft",
+            "arguments": {
+              "expected_version": 0,
+              "candidate_order": {
+                "order_type": "SALES",
+                "contract_id": {
+                  "$ref": "get_contract.data.id"
+                },
+                "customer_id": {
+                  "$ref": "get_contract.data.customer_id"
+                },
+                "project_id": {
+                  "$ref": "get_contract.data.project_id"
+                },
+                "contact": "张先生",
+                "delivery_date": "2026-11-01",
+                "address": {
+                  "$ref": "get_contract.data.delivery_address"
+                },
+                "items": [
+                  {
+                    "material_id": {
+                      "$ref": "get_contract.data.lines.0.material_id"
+                    },
+                    "raw_name": {
+                      "$ref": "get_contract.data.lines.0.material_name"
+                    },
+                    "specification": {
+                      "$ref": "get_contract.data.lines.0.specification"
+                    },
+                    "quantity": "2.000",
+                    "unit": {
+                      "$ref": "get_contract.data.lines.0.unit"
+                    }
+                  }
+                ]
+              },
+              "evidence_refs": [
+                {
+                  "field_path": "delivery_date",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2026-11-01",
+                  "accepted_value": "2026-11-01"
+                },
+                {
+                  "field_path": "items[0].quantity",
+                  "source_type": "USER_TEXT",
+                  "raw_value": "2吨",
+                  "accepted_value": "2.000"
+                }
+              ]
+            }
+          }
+        ]
+      ],
+      "final_text": "合同没有约定单价，请补充或确认价格来源。"
+    },
+    "unauthorized-direct-commit": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "commit_order",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "amount": "7000.00"
+            }
+          }
+        ]
+      ],
+      "final_text": "模型没有创建正式订单权限。"
+    },
+    "unauthorized-wrong-approver": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-same-key": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-lost-response": {
+      "extends": "normal-complete-sales"
+    },
+    "special-unknown-commit": {
+      "extends": "normal-complete-sales"
+    },
+    "special-concurrency-idempotency": {
+      "extends": "normal-complete-sales"
+    },
+    "special-concurrency-quota": {
+      "extends": "normal-complete-sales"
+    },
+    "unauthorized-old-approval": {
+      "extends": "normal-complete-sales"
+    },
+    "special-recovery-waiting-approval": {
+      "extends": "normal-complete-sales"
+    },
+    "special-recovery-waiting-input": {
+      "extends": "ambiguity-missing-spec"
+    },
+    "duplicate-double-click": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-draft-replay": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-key-payload-conflict": {
+      "extends": "normal-complete-sales"
+    },
+    "duplicate-commit-stale-approval": {
+      "extends": "normal-complete-sales"
+    }
+  }
+}

@@ -104,8 +104,11 @@ class TraceSink(Protocol):
 class DatabaseTraceSink:
     """调用前提交 RUNNING span，完成时另开事务写结果，保留崩溃可见性。"""
 
-    def __init__(self, session_factory: async_sessionmaker) -> None:
+    def __init__(
+        self, session_factory: async_sessionmaker, *, model_execution_mode: str = "LIVE"
+    ) -> None:
         self._session_factory = session_factory
+        self._model_execution_mode = model_execution_mode
 
     async def start(
         self,
@@ -125,7 +128,9 @@ class DatabaseTraceSink:
                 session,
                 name=name,
                 kind=kind,
-                execution_mode="LIVE",
+                execution_mode=(
+                    self._model_execution_mode if kind.upper() == "MODEL" else "LIVE"
+                ),
                 task_id=task_id,
                 actor=actor,
                 parent_span_id=parent_span_id,
@@ -849,13 +854,17 @@ def create_database_runner(
     *,
     session_factory: async_sessionmaker,
     config: Settings = settings,
+    model_client: ModelClient | None = None,
+    model_execution_mode: str = "LIVE",
 ) -> FunctionCallingRunner:
     """生产入口统一使用配置模型、现有 MCP client 与持久运行轨迹。"""
     return FunctionCallingRunner(
-        model_client=create_configured_model_client(config),
+        model_client=model_client or create_configured_model_client(config),
         mcp_client=MCPToolClient(
             config.mcp_url, timeout_seconds=config.model_timeout_seconds
         ),
-        trace_sink=DatabaseTraceSink(session_factory),
+        trace_sink=DatabaseTraceSink(
+            session_factory, model_execution_mode=model_execution_mode
+        ),
         config=config,
     )

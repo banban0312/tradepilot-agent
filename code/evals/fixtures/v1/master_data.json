@@ -45,6 +45,19 @@
         "occupied_amount": "0.00"
       }
     },
+    "sales_north_multi_line": {
+      "number": "TP-EVAL-SALES-NORTH-MULTI-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "valid_from": "2025-01-01",
+      "valid_to": "2030-12-31",
+      "total_amount": "150000.00",
+      "lines": [
+        { "material_id": "MAT-30", "price": "3500.00", "unit": "吨", "max_quantity": "100.000" },
+        { "material_id": "MAT-32", "price": "4800.00", "unit": "吨", "max_quantity": "100.000" }
+      ]
+    },
     "sales_north_small_balance": {
       "number": "TP-EVAL-SALES-NORTH-01",
       "direction": "sales",
@@ -90,6 +103,52 @@
         "material_id": "MAT-30",
         "price": "3500.00"
       }
+    },
+    "sales_north_over_cent": {
+      "number": "TP-EVAL-SALES-NORTH-CENT-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "10000.01",
+        "unit": "吨"
+      }
+    },
+    "sales_north_equal_balance": {
+      "number": "TP-EVAL-SALES-NORTH-EQUAL-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "5000.00",
+        "unit": "吨"
+      }
+    },
+    "sales_north_note_balance": {
+      "number": "TP-EVAL-SALES-NORTH-NOTE-01",
+      "direction": "sales",
+      "department": "north",
+      "status": "active",
+      "remaining_amount": "10000.00",
+      "line": {
+        "material_id": "MAT-30",
+        "price": "3500.00",
+        "unit": "吨"
+      }
+    }
+  },
+  "customers": {
+    "customer_north_similar": {
+      "code": "TP-EVAL-CUST-NORTH-SIM-01",
+      "name": "华北示例客户（集团）",
+      "department": "north",
+      "contact": "王先生",
+      "address": "北京市朝阳区评测路 3 号",
+      "active": true
     }
   },
   "materials": [
@@ -98,6 +157,8 @@
       "name": "HRB400",
       "spec": "12mm",
       "unit": "吨",
+      "source_code": "TP-DEMO-RB12",
+      "source_spec": "HRB400 12mm",
       "aliases": [
         "螺纹钢",
         "HRB400 12"
@@ -108,6 +169,8 @@
       "name": "HRB400",
       "spec": "16mm",
       "unit": "吨",
+      "source_code": "TP-DEMO-RB16",
+      "source_spec": "HRB400 16mm",
       "aliases": [
         "螺纹钢",
         "HRB400 16"
@@ -118,6 +181,8 @@
       "name": "Q235钢板",
       "spec": "8mm",
       "unit": "吨",
+      "source_code": "TP-DEMO-PLATE08",
+      "source_spec": "Q235 8mm",
       "aliases": [
         "钢板"
       ]

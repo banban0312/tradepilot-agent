@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
-from datetime import datetime
+from collections.abc import Callable, Mapping
+from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.agent.function_calling import create_database_runner
+from app.agent.function_calling import ModelClient, create_database_runner
 from app.agent.workflow import (
     GRAPH_VERSION,
     WorkflowResumeConflict,
@@ -67,6 +67,8 @@ class DatabaseWorkflowServices:
         task: AgentTask,
         actor: AuthContext,
         config: Settings,
+        model_client_factory: Callable[[Settings], ModelClient] | None = None,
+        model_execution_mode: str = "LIVE",
     ) -> None:
         self.session_factory = session_factory
         self.lease = lease
@@ -75,8 +77,20 @@ class DatabaseWorkflowServices:
         self.actor = actor
         self.config = config
         self.runner = create_database_runner(
-            session_factory=session_factory, config=config
+            session_factory=session_factory,
+            config=config,
+            model_client=(
+                model_client_factory(config)
+                if model_client_factory is not None
+                else None
+            ),
+            model_execution_mode=model_execution_mode,
         )
+
+    def _business_date(self, state: WorkflowState) -> date:
+        """使用任务输入时间按业务时区计算日期，保证评测规则可复现。"""
+        input_at = datetime.fromisoformat(state["input_at"])
+        return input_at.astimezone(ZoneInfo(self.config.business_timezone)).date()
 
     async def execute_tools(self, state: WorkflowState) -> Mapping[str, Any]:
         result = await self.runner.run(
@@ -115,23 +129,27 @@ class DatabaseWorkflowServices:
             if snapshot is None:
                 raise RuntimeError("草稿头存在但当前版本缺失")
             issues = list(snapshot.issues)
+            block_reason = ""
             if snapshot.is_validated and snapshot.candidate is not None:
                 precheck = await precheck_candidate(
                     session,
                     candidate=snapshot.candidate,
                     actor=self.actor,
-                    business_date=datetime.now(
-                        ZoneInfo(self.config.business_timezone)
-                    ).date(),
+                    business_date=self._business_date(state),
                 )
                 issues.extend(precheck.issues)
-            return {
+                if precheck.issues:
+                    block_reason = precheck.issues[0].message
+            result = {
                 "draft_id": str(snapshot.draft_id),
                 "draft_version": snapshot.version,
                 "missing_fields": [
                     {"field": item.field, "message": item.message} for item in issues
                 ],
             }
+            if block_reason:
+                result["block_reason"] = block_reason
+            return result
 
     async def verify_persisted_draft(self, state: WorkflowState) -> Mapping[str, Any]:
         async with self.session_factory() as session:
@@ -149,9 +167,7 @@ class DatabaseWorkflowServices:
                     session,
                     candidate=snapshot.candidate,
                     actor=self.actor,
-                    business_date=datetime.now(
-                        ZoneInfo(self.config.business_timezone)
-                    ).date(),
+                    business_date=self._business_date(state),
                 )
                 issues.extend(precheck.issues)
             return {
@@ -378,7 +394,11 @@ class DatabaseWorkflowServices:
 
 
 async def create_run_task_handler(
-    *, session_factory: async_sessionmaker, config: Settings = settings
+    *,
+    session_factory: async_sessionmaker,
+    config: Settings = settings,
+    model_client_factory: Callable[[Settings], ModelClient] | None = None,
+    model_execution_mode: str = "LIVE",
 ):
     """创建持久作业 handler；注册时不暴露审批或正式订单能力。"""
 
@@ -452,6 +472,8 @@ async def create_run_task_handler(
             task=task_copy,
             actor=actor,
             config=effective_config,
+            model_client_factory=model_client_factory,
+            model_execution_mode=model_execution_mode,
         )
         saver = EpochFencedPostgresSaver(lease)
         await saver.setup()
