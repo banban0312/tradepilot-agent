@@ -92,14 +92,19 @@ def evaluate_assertions(expected: dict, actual: dict) -> list[dict[str, Any]]:
         observed = _resolve_source(actual, source)
         target = assertion["expected"]
         operator = assertion["operator"]
-        passed = (
-            observed == target
-            if operator == "eq"
-            else isinstance(observed, list | tuple | set)
-            and set(target).issubset(set(observed))
-            if operator == "contains_all"
-            else False
-        )
+        try:
+            passed = (
+                observed == target
+                if operator == "eq"
+                else isinstance(observed, list | tuple | set)
+                and isinstance(target, list | tuple | set)
+                and set(target).issubset(set(observed))
+                if operator == "contains_all"
+                else False
+            )
+        except TypeError:
+            # 不可哈希的损坏断言值应作为失败定位，不能中断整批报告生成。
+            passed = False
         if not passed:
             failed.append(
                 {
@@ -161,7 +166,21 @@ class EvaluationService:
                     )
                 )
                 continue
-            failed = evaluate_assertions(expected, actual)
+            try:
+                failed = evaluate_assertions(expected, actual)
+            except Exception as exc:  # noqa: BLE001 - malformed assertions are case errors.
+                results.append(
+                    CaseResult(
+                        case_id=case["id"],
+                        category=case["category"],
+                        status="ERROR",
+                        expected=expected,
+                        input=case.get("input", {}),
+                        actual={"exception_type": type(exc).__name__},
+                        error_code="EVAL_ASSERTION_ERROR",
+                    )
+                )
+                continue
             results.append(
                 CaseResult(
                     case_id=case["id"],

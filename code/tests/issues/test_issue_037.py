@@ -104,6 +104,16 @@ def test_assertions_require_exact_values_and_report_atomic_artifacts(
         expected, {"database": {"orders": 1}, "trace": {"tools": []}}
     )
     assert len(failures) == 2
+    malformed = {
+        "assertions": [
+            {
+                "source": "trace.tools",
+                "operator": "contains_all",
+                "expected": [["not", "hashable"]],
+            }
+        ]
+    }
+    assert evaluate_assertions(malformed, {"trace": {"tools": ["anything"]}})
 
     results = [
         # 安全类别被标为失败时，汇总必须失败。
