@@ -192,3 +192,49 @@ def test_cli_writes_report_and_returns_nonzero_for_failed_assertion(
     report = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
     assert report["selected_case_ids"] == ["single"]
     assert report["status_counts"]["FAIL"] == 1
+
+
+def test_cli_reports_missing_executor_as_error_without_marking_cases_pass(
+    tmp_path: Path,
+) -> None:
+    evals_root = tmp_path / "evals"
+    dataset = evals_root / "datasets" / "v1"
+    dataset.mkdir(parents=True)
+    (dataset / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_version": "1.0.0",
+                "master_data_version": "1.0.0",
+                "input_fixture_version": "1.0.0",
+                "case_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (dataset / "cases.jsonl").write_text(
+        json.dumps({**_case("single"), "execution_modes": ["online"]}) + "\n",
+        encoding="utf-8",
+    )
+    report_dir = tmp_path / "reports" / "missing-adapter"
+    exit_code = main(
+        [
+            "--mode",
+            "online",
+            "--dataset",
+            "v1",
+            "--dataset-root",
+            str(evals_root),
+            "--executor-factory",
+            "evals.module_that_does_not_exist:create_executor",
+            "--report-dir",
+            str(report_dir),
+            "--case",
+            "single",
+        ]
+    )
+    assert exit_code == 1
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    row = json.loads((report_dir / "cases.jsonl").read_text(encoding="utf-8"))
+    assert summary["status_counts"]["ERROR"] == 1
+    assert summary["status_counts"]["PASS"] == 0
+    assert row["error_code"] == "EVAL_EXECUTOR_CONFIGURATION_ERROR"

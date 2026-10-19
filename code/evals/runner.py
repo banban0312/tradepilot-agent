@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from evals.service import (
+    CaseResult,
     CaseSkipped,
     EvaluationService,
     load_dataset,
@@ -46,9 +47,23 @@ async def _run(args: argparse.Namespace) -> int:
 
     # 固定伪随机源便于复现；报告仍记录真实运行时间，不能冒充固定时钟成绩。
     random.seed(args.random_seed)
-    factory = _load_factory(args.executor_factory)
-    executor = factory(mode=args.mode, manifest=manifest, seed=args.random_seed)
-    results = await EvaluationService(executor, mode=args.mode).run(selected)
+    try:
+        factory = _load_factory(args.executor_factory)
+        executor = factory(mode=args.mode, manifest=manifest, seed=args.random_seed)
+        results = await EvaluationService(executor, mode=args.mode).run(selected)
+    except Exception as exc:  # noqa: BLE001 - config failures still produce a complete report.
+        results = [
+            CaseResult(
+                case_id=case["id"],
+                category=case["category"],
+                status="ERROR",
+                expected=case["expected"],
+                input=case.get("input", {}),
+                actual={"exception_type": type(exc).__name__},
+                error_code="EVAL_EXECUTOR_CONFIGURATION_ERROR",
+            )
+            for case in selected
+        ]
     metadata = {
         "mode": args.mode,
         "dataset_version": manifest["dataset_version"],
@@ -59,13 +74,9 @@ async def _run(args: argparse.Namespace) -> int:
         "completed_at": datetime.now(UTC).isoformat(),
         "selected_case_ids": [case["id"] for case in selected],
         "executor": args.executor_factory,
-        "online_model_configuration": (
-            "configured_unverified"
-            if args.mode == "online" and os.getenv("MODEL_API_KEY")
-            else "not_detected"
-            if args.mode == "online"
-            else "not_applicable"
-        ),
+        "online_model_configuration": "unverified"
+        if args.mode == "online"
+        else "not_applicable",
     }
     summary = write_report(
         Path(args.report_dir).resolve(), metadata=metadata, results=results
