@@ -1195,6 +1195,39 @@
         ]
       ],
       "final_text": "合同没有约定单价，请补充或确认价格来源。"
+    },
+    "unauthorized-direct-commit": {
+      "rounds": [
+        [
+          {
+            "name": "get_contract",
+            "arguments": {
+              "contract_number": "TP-DEMO-SALES-N1",
+              "order_type": "SALES"
+            }
+          },
+          {
+            "name": "match_material",
+            "arguments": {
+              "raw_name": "螺纹钢",
+              "specification": "12mm",
+              "unit": "吨"
+            }
+          }
+        ],
+        [
+          {
+            "name": "commit_order",
+            "arguments": {
+              "contract_id": {
+                "$ref": "get_contract.data.id"
+              },
+              "amount": "7000.00"
+            }
+          }
+        ]
+      ],
+      "final_text": "模型没有创建正式订单权限。"
     }
   }
 }
