@@ -74,6 +74,9 @@ def test_dataset_loading_rejects_traversal_and_selection_rejects_missing_case() 
     root = Path(__file__).resolve().parents[2] / "evals"
     manifest, cases = load_dataset(root, "v1")
     assert manifest["case_count"] == 41
+    first_case = next(case for case in cases if case["id"] == "normal-complete-sales")
+    assert first_case["contract_fixture"] == "sales_north_default"
+    assert "TP-DEMO-SALES-N1" in first_case["input"]["value"]
     assert len(select_cases(cases, case_ids={cases[0]["id"]}, categories=None)) == 1
     with pytest.raises(ValueError, match="版本"):
         load_dataset(root, "..")
@@ -238,3 +241,144 @@ def test_cli_reports_missing_executor_as_error_without_marking_cases_pass(
     assert summary["status_counts"]["ERROR"] == 1
     assert summary["status_counts"]["PASS"] == 0
     assert row["error_code"] == "EVAL_EXECUTOR_CONFIGURATION_ERROR"
+
+
+def test_backend_executor_refuses_to_touch_non_sandbox_environment(monkeypatch) -> None:
+    from evals.backend_executor import BackendCaseExecutor
+
+    monkeypatch.delenv("TRADEPILOT_EVAL_SANDBOX", raising=False)
+    with pytest.raises(ValueError, match="隔离"):
+        BackendCaseExecutor(mode="offline", manifest={}, seed=1)
+
+
+@pytest.mark.asyncio
+async def test_offline_model_fixture_uses_real_tool_outputs_without_expected_values() -> (
+    None
+):
+    from evals.backend_executor import FixtureModelClient
+
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "evals/fixtures/v1/model_responses.json"
+        ).read_text(encoding="utf-8")
+    )
+    client = FixtureModelClient(
+        case_id="normal-complete-sales",
+        fixture=fixture["cases"]["normal-complete-sales"],
+    )
+    first = await client.create_response(
+        instructions="fixture",
+        input_items=[{"role": "user", "content": "case input"}],
+        tools=[],
+    )
+    assert [call["name"] for call in first.output] == [
+        "get_contract",
+        "match_material",
+    ]
+
+    history = [
+        *first.output,
+        {
+            "type": "function_call_output",
+            "call_id": first.output[0]["call_id"],
+            "output": json.dumps(
+                {
+                    "data": {
+                        "id": "00000000-0000-4000-8000-000000000050",
+                        "customer_id": "00000000-0000-4000-8000-000000000010",
+                        "project_id": "00000000-0000-4000-8000-000000000020",
+                        "delivery_address": "隔离示例地址",
+                        "lines": [{"unit_price": "3500.000000"}],
+                    }
+                }
+            ),
+        },
+        {
+            "type": "function_call_output",
+            "call_id": first.output[1]["call_id"],
+            "output": json.dumps(
+                {
+                    "data": {
+                        "candidates": [
+                            {"material_id": "00000000-0000-4000-8000-000000000030"}
+                        ]
+                    }
+                }
+            ),
+        },
+    ]
+    second = await client.create_response(
+        instructions="fixture", input_items=history, tools=[]
+    )
+    save_arguments = json.loads(second.output[0]["arguments"])
+    assert save_arguments["candidate_order"]["contract_id"].endswith("000000000050")
+    assert save_arguments["candidate_order"]["items"][0]["material_id"].endswith(
+        "000000000030"
+    )
+    assert (
+        save_arguments["candidate_order"]["items"][0]["specification"] == "HRB400 12mm"
+    )
+    assert save_arguments["candidate_order"]["items"][0]["unit_price"] == "3500.000000"
+
+
+@pytest.mark.asyncio
+async def test_contract_price_fallback_is_server_sourced_and_auditable() -> None:
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import UUID
+
+    from evals.backend_executor import _BACKEND_ROOT
+
+    assert _BACKEND_ROOT.is_dir()
+    from app.drafts.service import _fill_contract_prices
+    from app.drafts.types import (
+        CandidateOrder,
+        CandidateOrderItem,
+        FieldEvidenceInput,
+        FieldSource,
+    )
+
+    contract_id = UUID("00000000-0000-4000-8000-000000000050")
+    material_id = UUID("00000000-0000-4000-8000-000000000030")
+    line_id = UUID("00000000-0000-4000-8000-000000000060")
+    session = SimpleNamespace(
+        scalar=AsyncMock(
+            return_value=SimpleNamespace(id=line_id, unit_price=Decimal("3500.000000"))
+        )
+    )
+    candidate = CandidateOrder(
+        contract_id=contract_id,
+        items=(
+            CandidateOrderItem(
+                material_id=material_id,
+                specification="HRB400 12mm",
+                quantity=Decimal(2),
+                unit="吨",
+                unit_price=None,
+            ),
+        ),
+        evidence=(
+            FieldEvidenceInput(
+                field_path="items[0].unit_price",
+                source_type=FieldSource.MASTER_DATA,
+                accepted_value="9999.000000",
+            ),
+        ),
+    )
+
+    saved_candidate = await _fill_contract_prices(session, candidate)
+
+    assert saved_candidate.items[0].unit_price == Decimal("3500.000000")
+    evidence = next(
+        item
+        for item in saved_candidate.evidence
+        if item.field_path == "items[0].unit_price"
+    )
+    assert evidence.source_type is FieldSource.MASTER_DATA
+    assert evidence.locator == {"contract_line_id": str(line_id)}
+    assert evidence.accepted_value == "3500.000000"
+    assert sum(
+        item.field_path == "items[0].unit_price" for item in saved_candidate.evidence
+    ) == 1

@@ -16,7 +16,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.context import BUSINESS_OPERATOR, AuthContext, require_role
-from app.models import Draft, DraftItem, DraftRevision, FieldEvidence, TaskApproval
+from app.models import (
+    ContractLine,
+    Draft,
+    DraftItem,
+    DraftRevision,
+    FieldEvidence,
+    TaskApproval,
+)
 from app.observability.service import append_task_event
 
 from .types import (
@@ -25,6 +32,7 @@ from .types import (
     DraftValidationError,
     DraftValidationIssue,
     FieldEvidenceInput,
+    FieldSource,
     candidate_amounts,
     validate_candidate,
 )
@@ -113,6 +121,8 @@ async def save_candidate(
     require_role(actor, BUSINESS_OPERATOR)
     if expected_version < 0:
         raise ValueError("expected_version 不能小于 0")
+
+    candidate = await _fill_contract_prices(session, candidate)
 
     # 先在同一事务中确保草稿头存在；并发首次保存由主键冲突安全串行化。
     await session.execute(
@@ -224,11 +234,13 @@ async def save_candidate(
         from datetime import UTC, datetime
 
         approvals = await session.scalars(
-            select(TaskApproval).where(
+            select(TaskApproval)
+            .where(
                 TaskApproval.draft_id == draft.id,
                 TaskApproval.decision == "APPROVE",
                 TaskApproval.invalidated_at.is_(None),
-            ).with_for_update()
+            )
+            .with_for_update()
         )
         now = datetime.now(UTC)
         for approval in approvals:
@@ -253,6 +265,47 @@ async def save_candidate(
         is_validated=is_validated,
         issues=issues,
         created=True,
+    )
+
+
+async def _fill_contract_prices(
+    session: AsyncSession, candidate: CandidateOrder
+) -> CandidateOrder:
+    """缺少单价时只补合同明细价格，并留下由服务端生成的来源证据。"""
+    if candidate.contract_id is None:
+        return candidate
+
+    items = list(candidate.items)
+    evidence = list(candidate.evidence)
+    changed = False
+    for index, item in enumerate(items):
+        if item.unit_price is not None or item.material_id is None or item.unit is None:
+            continue
+        line = await session.scalar(
+            select(ContractLine).where(
+                ContractLine.contract_id == candidate.contract_id,
+                ContractLine.material_id == item.material_id,
+                ContractLine.unit == item.unit,
+            )
+        )
+        if line is None or line.unit_price is None:
+            continue
+        items[index] = item.model_copy(update={"unit_price": line.unit_price})
+        field_path = f"items[{index}].unit_price"
+        evidence = [entry for entry in evidence if entry.field_path != field_path]
+        evidence.append(
+            FieldEvidenceInput(
+                field_path=field_path,
+                source_type=FieldSource.MASTER_DATA,
+                locator={"contract_line_id": str(line.id)},
+                accepted_value=format(line.unit_price, "f"),
+            )
+        )
+        changed = True
+    if not changed:
+        return candidate
+    return candidate.model_copy(
+        update={"items": tuple(items), "evidence": tuple(evidence)}
     )
 
 

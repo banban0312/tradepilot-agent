@@ -98,6 +98,8 @@
       "name": "HRB400",
       "spec": "12mm",
       "unit": "吨",
+      "source_code": "TP-DEMO-RB12",
+      "source_spec": "HRB400 12mm",
       "aliases": [
         "螺纹钢",
         "HRB400 12"
@@ -108,6 +110,8 @@
       "name": "HRB400",
       "spec": "16mm",
       "unit": "吨",
+      "source_code": "TP-DEMO-RB16",
+      "source_spec": "HRB400 16mm",
       "aliases": [
         "螺纹钢",
         "HRB400 16"
@@ -118,6 +122,8 @@
       "name": "Q235钢板",
       "spec": "8mm",
       "unit": "吨",
+      "source_code": "TP-DEMO-PLATE08",
+      "source_spec": "Q235 8mm",
       "aliases": [
         "钢板"
       ]

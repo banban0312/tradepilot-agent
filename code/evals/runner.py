@@ -50,8 +50,12 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         factory = _load_factory(args.executor_factory)
         executor = factory(mode=args.mode, manifest=manifest, seed=args.random_seed)
+        execution_metadata = getattr(executor, "metadata", {})
+        if not isinstance(execution_metadata, dict):
+            execution_metadata = {}
         results = await EvaluationService(executor, mode=args.mode).run(selected)
     except Exception as exc:  # noqa: BLE001 - config failures still produce a complete report.
+        execution_metadata = {}
         results = [
             CaseResult(
                 case_id=case["id"],
@@ -74,6 +78,7 @@ async def _run(args: argparse.Namespace) -> int:
         "completed_at": datetime.now(UTC).isoformat(),
         "selected_case_ids": [case["id"] for case in selected],
         "executor": args.executor_factory,
+        "execution_metadata": execution_metadata,
         "online_model_configuration": "unverified"
         if args.mode == "online"
         else "not_applicable",
