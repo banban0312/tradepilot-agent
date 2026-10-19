@@ -104,7 +104,9 @@ class BackendCaseExecutor:
         if mode != self.mode:
             raise ValueError("评测执行器模式与服务模式不一致")
         actions = [action.get("kind") for action in case.get("actions", [])]
-        if actions != ["create_task"]:
+        if not actions or actions[0] != "create_task":
+            raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
+        if actions[1:] not in ([], ["human_approve_current_version", "commit_once"]):
             raise CaseSkipped("EVAL_ACTION_NOT_SUPPORTED")
         if case.get("input", {}).get("kind") != "text":
             raise CaseSkipped("EVAL_FILE_INPUT_NOT_SUPPORTED")
@@ -112,6 +114,12 @@ class BackendCaseExecutor:
             fixture = self.model_fixtures.get("cases", {}).get(case["id"])
             if fixture is None:
                 raise CaseSkipped("EVAL_OFFLINE_MODEL_FIXTURE_UNAVAILABLE")
+            base_fixture_id = fixture.get("extends")
+            if base_fixture_id is not None:
+                base_fixture = self.model_fixtures.get("cases", {}).get(base_fixture_id)
+                if not isinstance(base_fixture, dict):
+                    raise ValueError("离线模型响应夹具继承目标不存在")
+                fixture = {**base_fixture, **fixture}
             if self.model_fixtures.get("version") != self.manifest.get(
                 "input_fixture_version"
             ):
@@ -131,8 +139,10 @@ class BackendCaseExecutor:
     async def _execute_task(
         self, case: dict, *, model_client_factory, model_execution_mode: str
     ) -> dict:
+        actions = [action.get("kind") for action in case.get("actions", [])]
         from app.database import async_session_factory, engine
         from app.models import (
+            AgentTask,
             Contract,
             ContractBalance,
             Draft,
@@ -229,6 +239,16 @@ class BackendCaseExecutor:
             if not await worker.run_once():
                 raise RuntimeError("隔离评测 Worker 未领取新建任务")
 
+            if len(actions) > 1:
+                await self._run_approval_actions(
+                    client=client,
+                    task_id=task_id,
+                    approver=self.fixtures["actors"][f"approver_{actor['department']}"]
+                    if actor.get("department") != "all"
+                    else self.fixtures["actors"]["admin"],
+                    worker=worker,
+                )
+
             task_response = await client.get(f"/api/v1/tasks/{task_id}")
             task_response.raise_for_status()
             task_data = task_response.json()["data"]
@@ -262,6 +282,16 @@ class BackendCaseExecutor:
                     .where(QuotaOccupation.task_id == task_uuid)
                 )
                 or 0
+            )
+            task_owner_id = await session.scalar(
+                select(AgentTask.owner_id).where(AgentTask.id == task_uuid)
+            )
+            approval_rows = list(
+                (
+                    await session.scalars(
+                        select(TaskApproval).where(TaskApproval.task_id == task_uuid)
+                    )
+                ).all()
             )
             balance = await session.get(ContractBalance, contract.id)
             occupied_after = (
@@ -337,12 +367,55 @@ class BackendCaseExecutor:
             "database": {
                 "orders": orders,
                 "approvals": approvals,
+                "approval_actor_is_distinct": bool(approval_rows)
+                and all(row.actor_id != task_owner_id for row in approval_rows),
                 "quota_occupations": occupations,
                 "occupied_amount_delta": f"{occupied_after - occupied_before:.2f}",
             },
             "task_id": task_id,
             "trace_id": str(trace_rows[0].trace_id) if trace_rows else None,
         }
+
+    async def _run_approval_actions(self, *, client, task_id, approver, worker) -> None:
+        """Approve through an independent authenticated user, then resume the real worker."""
+        task_response = await client.get(f"/api/v1/tasks/{task_id}")
+        task_response.raise_for_status()
+        task = task_response.json()["data"]
+        active_wait = task.get("active_wait")
+        if task.get("state") != "WAITING_APPROVAL" or not isinstance(active_wait, dict):
+            raise RuntimeError("当前案例没有可供人工批准的活动等待点")
+        required_wait_fields = (
+            "draft_version",
+            "content_hash",
+            "checkpoint_id",
+            "interrupt_id",
+        )
+        if any(not active_wait.get(field) for field in required_wait_fields):
+            raise RuntimeError("人工审批等待点缺少版本绑定信息")
+
+        login_response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "login": approver["login"],
+                "password": self.settings.demo_password.get_secret_value(),
+            },
+        )
+        login_response.raise_for_status()
+        client.headers["X-CSRF-Token"] = login_response.json()["data"]["csrf_token"]
+        review_response = await client.post(
+            f"/api/v1/tasks/{task_id}/review",
+            headers={"Idempotency-Key": f"eval-review-{uuid4().hex}"},
+            json={
+                "decision": "APPROVE",
+                "draft_version": active_wait["draft_version"],
+                "content_hash": active_wait["content_hash"],
+                "checkpoint_id": active_wait["checkpoint_id"],
+                "interrupt_id": active_wait["interrupt_id"],
+            },
+        )
+        review_response.raise_for_status()
+        if not await worker.run_once():
+            raise RuntimeError("人工审批后隔离 Worker 未领取恢复作业")
 
 
 async def _normalize_draft_fields(

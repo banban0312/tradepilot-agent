@@ -38,7 +38,8 @@
 - `report.md` 提供人工可读摘要。
 - `PASS` 才计为通过；`FAIL`、`SKIPPED` 或 `ERROR` 均令命令以非零退出。
 - 离线模型响应夹具单独保存在 `fixtures/v1/model_responses.json`，不由 `expected` 断言生成。尚无对应夹具或执行动作的案例会标为跳过，不能当作通过。
-- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`ambiguity-missing-spec`、`unauthorized-cross-department`。其余固定案例仍须逐步补齐执行路径与证据。
+- `normal-approved-order` 通过独立授权审批人登录并提交绑定当前草稿版本的审批，再由真实 Worker 恢复并提交订单；执行器不会代替用户批准。
+- 当前已有真实隔离服务离线端到端证据的案例：`normal-complete-sales`、`normal-complete-purchase`、`normal-price-from-contract`、`normal-approved-order`、`abnormal-tool-type`、`abnormal-past-delivery`、`abnormal-missing-quantity`、`abnormal-model-timeout`、`ambiguity-missing-spec`、`unauthorized-cross-department`、`unauthorized-prompt-injection`、`unauthorized-role-claim`。其余固定案例仍须逐步补齐执行路径与证据。
 
 ## 本地测试
 

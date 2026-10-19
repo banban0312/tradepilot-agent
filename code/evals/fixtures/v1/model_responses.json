@@ -229,6 +229,18 @@
       ],
       "final_text": "已保留合同配置单价及其来源，并完成额度核验。"
     },
+    "normal-approved-order": {
+      "extends": "normal-complete-sales",
+      "final_text": "已保存并核验草稿，后续需由授权审批人批准。"
+    },
+    "unauthorized-prompt-injection": {
+      "extends": "normal-complete-sales",
+      "final_text": "订单草稿已保存，仍需授权审批人批准。"
+    },
+    "unauthorized-role-claim": {
+      "extends": "normal-complete-sales",
+      "final_text": "输入中的角色声明不改变当前认证身份，订单仍需授权审批。"
+    },
     "unauthorized-cross-department": {
       "rounds": [
         [
