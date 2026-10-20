@@ -52,6 +52,64 @@ async function waitFor(send, expression, description, timeoutMs = 15_000) {
   throw new Error(`${browserName} ${version} 等待${description}超时；页面状态：${JSON.stringify(diagnostics)}`)
 }
 
+async function measureOrderRefreshFeedback(send) {
+  const emulatedNetworkLatencyMs = 1_200
+  await send('Network.enable')
+  await send('Network.emulateNetworkConditions', {
+    offline: false,
+    latency: emulatedNetworkLatencyMs,
+    downloadThroughput: -1,
+    uploadThroughput: -1,
+    connectionType: 'wifi',
+  })
+  let feedback
+  try {
+    feedback = await evaluate(send, `(() => new Promise((resolve, reject) => {
+      const button = [...document.querySelectorAll('.page-heading__actions button')]
+        .find((element) => element.innerText.includes('刷新列表'));
+      if (!button || button.disabled) return reject(new Error('订单中心刷新按钮不可用。'));
+      const started = performance.now();
+      button.click();
+      const deadline = started + 2_000;
+      const check = () => {
+        const status = document.querySelector('.order-list-state[role="status"]');
+        if (status?.innerText.includes('正在读取授权范围内')) {
+          return resolve({
+            action: '订单中心点击刷新列表',
+            feedback: '正在读取授权范围内的订单',
+            latency_ms: Number((performance.now() - started).toFixed(3)),
+            threshold_ms: 300,
+            emulated_network_latency_ms: ${emulatedNetworkLatencyMs},
+          });
+        }
+        if (performance.now() >= deadline) {
+          return reject(new Error('点击刷新后未显示订单读取中状态。'));
+        }
+        requestAnimationFrame(check);
+      };
+      requestAnimationFrame(check);
+    }))()`)
+    if (feedback.latency_ms > feedback.threshold_ms) {
+      throw new Error(`订单刷新处理中反馈耗时 ${feedback.latency_ms}ms，超过 ${feedback.threshold_ms}ms。`)
+    }
+    feedback.result = 'passed'
+  } finally {
+    await send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+      connectionType: 'wifi',
+    })
+  }
+  await waitFor(
+    send,
+    "!document.querySelector('.order-list-state[role=status]')",
+    '订单刷新完成',
+  )
+  return feedback
+}
+
 async function runViewport(viewport) {
   const profile = path.join(os.tmpdir(), `tp-issue041-${randomUUID()}`)
   mkdirSync(profile, { recursive: true })
@@ -159,12 +217,17 @@ async function runViewport(viewport) {
     if (!workbenchLayout.composer || workbenchLayout.scrollWidth > workbenchLayout.viewportWidth + 2) {
       throw new Error(`${browserName} ${version} 新任务工作台主区域或横向布局检查失败。`)
     }
+    await send('Page.navigate', { url: `${origin}/orders` })
+    await waitFor(send, "location.pathname === '/orders' && document.querySelector('h1')?.innerText.includes('订单中心')", '反馈测量的订单中心')
+    await waitFor(send, "!document.querySelector('.order-list-state[role=status]')", '反馈测量前订单列表就绪')
+    const interactionFeedback = await measureOrderRefreshFeedback(send)
     return {
       width: viewport.width,
       height: viewport.height,
       login: 'passed',
       orders: 'passed',
       new_task_workbench: 'passed',
+      interaction_feedback: interactionFeedback,
       document_horizontal_overflow: false,
       screenshots: [ordersScreenshot, workbenchScreenshot],
     }

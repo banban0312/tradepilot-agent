@@ -92,6 +92,7 @@ async def test_issue_041_measure_100_business_api_samples() -> None:
         json.dumps(
             {
                 "endpoint": "GET /api/v1/admin/contracts?limit=100",
+                "measurement_scope": "HTTP API response time; page feedback is measured by the browser smoke",
                 "sample_count": len(timings_ms),
                 "p50_ms": round(ordered[49], 3),
                 "p95_ms": round(p95, 3),
@@ -106,7 +107,6 @@ async def test_issue_041_measure_100_business_api_samples() -> None:
     )
     assert len(timings_ms) == 100
     assert p95 <= 1000, f"本地业务 API P95 {p95:.3f}ms 超过 1000ms"
-    assert p95 <= 300, f"交互响应 P95 {p95:.3f}ms 超过 300ms"
 
 
 @pytest.mark.asyncio

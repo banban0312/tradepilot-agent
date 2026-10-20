@@ -175,10 +175,26 @@ function Test-ResponsiveBrowser {
             & docker image rm $edgeImageName 2>$null | Out-Null
         }
     }
+    $feedbackSamples = @()
     foreach ($browserName in @('Chrome', 'Edge')) {
         if ($browserResults[$browserName].status -ne 'tested') { $browserFailures += "$browserName 当前版/前一主版本兼容矩阵未完成。" }
+        foreach ($versionResult in @($browserResults[$browserName].versions)) {
+            foreach ($viewportResult in @($versionResult.viewports)) {
+                $feedback = $viewportResult.interaction_feedback
+                if (-not $feedback -or $feedback.result -ne 'passed') {
+                    $browserFailures += "$browserName $($versionResult.version) 缺少有效的页面处理中反馈测量。"
+                    continue
+                }
+                $feedbackSamples += [double]$feedback.latency_ms
+            }
+        }
     }
-    [ordered]@{ checked_at_utc = [DateTimeOffset]::UtcNow.ToString('o'); url = "http://localhost:$env:WEB_PORT/login?redirect=/orders"; flows = @('真实登录', '订单中心读取', '新任务工作台加载'); browser_matrix = $browserResults } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $reportPath 'browser-compatibility.json') -Encoding utf8
+    if ($feedbackSamples.Count -ne 8) { $browserFailures += "页面反馈测量样本数为 $($feedbackSamples.Count)，预期 8 个浏览器/视口样本。" }
+    $feedbackOrdered = @($feedbackSamples | Sort-Object)
+    $feedbackP95 = if ($feedbackOrdered.Count) { $feedbackOrdered[[Math]::Min($feedbackOrdered.Count - 1, [Math]::Ceiling($feedbackOrdered.Count * 0.95) - 1)] } else { [double]::PositiveInfinity }
+    if ($feedbackP95 -gt 300) { $browserFailures += "页面交互处理中反馈 P95 为 $([Math]::Round($feedbackP95, 3))ms，超过 300ms。" }
+    $feedbackReport = [ordered]@{ action = '点击订单中心刷新列表并显示读取中状态'; sample_count = $feedbackOrdered.Count; threshold_ms = 300; p50_ms = if ($feedbackOrdered.Count) { $feedbackOrdered[[int][Math]::Floor(($feedbackOrdered.Count - 1) / 2)] } else { $null }; p95_ms = if ($feedbackOrdered.Count) { [Math]::Round($feedbackP95, 3) } else { $null }; max_ms = if ($feedbackOrdered.Count) { [Math]::Round($feedbackOrdered[-1], 3) } else { $null }; response_time_excluded = $true; result = if ($feedbackP95 -le 300 -and $feedbackOrdered.Count -eq 8) { 'passed' } else { 'failed' } }
+    [ordered]@{ checked_at_utc = [DateTimeOffset]::UtcNow.ToString('o'); url = "http://localhost:$env:WEB_PORT/login?redirect=/orders"; flows = @('真实登录', '订单中心读取', '新任务工作台加载', '点击刷新后 300ms 内显示处理中反馈'); interaction_feedback = $feedbackReport; browser_matrix = $browserResults } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $reportPath 'browser-compatibility.json') -Encoding utf8
     if ($browserFailures.Count) { throw "浏览器验收有失败项：$($browserFailures -join '；')" }
 }
 
