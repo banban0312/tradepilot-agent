@@ -10,11 +10,12 @@ from uuid import UUID
 
 import httpx
 import pytest
+from openpyxl import Workbook
+from sqlalchemy import func, select
+
 from app.database import async_session_factory
 from app.models import AgentTask, AuditEvent, ImportBatchItem, TaskJob
 from app.tasks.service import MAX_ACTIVE_TASKS, try_claim_job
-from openpyxl import Workbook
-from sqlalchemy import func, select
 
 API_URL = os.getenv("TRADEPILOT_TEST_API_URL", "http://api:8000")
 ORIGIN = os.getenv("APP_ORIGIN", "http://localhost:5173")
