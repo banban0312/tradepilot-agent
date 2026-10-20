@@ -61,6 +61,7 @@ async function runViewport(viewport) {
     [
       '--headless=new',
       '--disable-gpu',
+      ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
       '--no-first-run',
       '--disable-background-networking',
       '--remote-debugging-port=0',
@@ -69,7 +70,7 @@ async function runViewport(viewport) {
       `--window-size=${viewport.width},${viewport.height}`,
       `${origin}/login?redirect=/orders`,
     ],
-    { stdio: 'ignore', windowsHide: true },
+    { stdio: 'ignore', windowsHide: true, detached: process.platform === 'linux' },
   )
   let socket
   try {
@@ -169,18 +170,28 @@ async function runViewport(viewport) {
     }
   } finally {
     if (socket?.readyState === WebSocket.OPEN) socket.close()
-    if (browser.exitCode === null) {
-      browser.kill()
-      await new Promise((resolve) => {
-        if (browser.exitCode !== null) return resolve()
-        browser.once('exit', resolve)
-        setTimeout(resolve, 5_000).unref()
-      })
+    const stopBrowserGroup = (signal) => {
+      try {
+        if (process.platform === 'linux') process.kill(-browser.pid, signal)
+        else if (browser.exitCode === null) browser.kill(signal)
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+    }
+    const waitForBrowserExit = (timeoutMs) => new Promise((resolve) => {
+      if (browser.exitCode !== null) return resolve(true)
+      const timeout = setTimeout(() => resolve(false), timeoutMs)
+      browser.once('exit', () => { clearTimeout(timeout); resolve(true) })
+    })
+    stopBrowserGroup('SIGTERM')
+    if (!(await waitForBrowserExit(5_000))) {
+      stopBrowserGroup('SIGKILL')
+      await waitForBrowserExit(1_000)
     }
     const tempRoot = path.resolve(os.tmpdir())
     const profilePath = path.resolve(profile)
     if (profilePath.startsWith(`${tempRoot}${path.sep}`)) {
-      rmSync(profilePath, { recursive: true, force: true })
+      rmSync(profilePath, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })
     }
   }
 }
@@ -189,6 +200,18 @@ const results = []
 for (const viewport of viewports) results.push(await runViewport(viewport))
 writeFileSync(
   path.join(reportRoot, `${browserName.toLowerCase()}-${version}-browser-smoke.json`),
-  JSON.stringify({ browser: browserName, version, result: 'passed', viewports: results }, null, 2),
+  JSON.stringify({
+    browser: browserName,
+    version,
+    platform: process.platform === 'win32' ? 'windows' : process.platform,
+    result: 'passed',
+    viewports: results,
+  }, null, 2),
 )
-process.stdout.write(JSON.stringify({ browser: browserName, version, result: 'passed', viewports: results }))
+process.stdout.write(JSON.stringify({
+  browser: browserName,
+  version,
+  platform: process.platform === 'win32' ? 'windows' : process.platform,
+  result: 'passed',
+  viewports: results,
+}))

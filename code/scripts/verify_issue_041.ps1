@@ -10,6 +10,7 @@ $envFile = Join-Path $codeRoot 'backend/.env'
 $projectName = 'tp-issue041-' + [Guid]::NewGuid().ToString('N').ToLowerInvariant()
 $imageName = "tradepilot/backend:verify-$projectName"
 $webImageName = "tradepilot/web:verify-$projectName"
+$edgeImageName = "tradepilot/edge-smoke:verify-$projectName"
 $reportRoot = Join-Path $codeRoot 'artifacts/performance'
 $reportPath = Join-Path $reportRoot $projectName
 $reportContainerPath = "/workspace/artifacts/performance/$projectName"
@@ -127,6 +128,56 @@ function Test-ResponsiveBrowser {
         if ($matrixStatus -eq 'incomplete') { Write-Warning "$browserName 当前/前一主版本矩阵未补齐；本次实际测试版本：$($versionResults.version -join ', ')。" }
         $browserResults[$browserName] = @{ status = $matrixStatus; versions = $versionResults }
     }
+
+    $edgePackage = Join-Path $browserRoot 'edge-linux-154.0.4258.62-amd64.deb'
+    if (Test-Path -LiteralPath $edgePackage) {
+        $expectedHash = 'F425DEA59F0A8BAC00201685A070E947543C57D135C130BA73E0863CF2C506B1'
+        $actualHash = (Get-FileHash -LiteralPath $edgePackage -Algorithm SHA256).Hash
+        if ($actualHash -ne $expectedHash) { throw 'Edge 154 Linux 官方安装包 SHA-256 不匹配。' }
+
+        $edgeContext = Join-Path $reportPath 'edge-linux-build-context'
+        New-Item -ItemType Directory -Path $edgeContext | Out-Null
+        Copy-Item -LiteralPath $edgePackage -Destination (Join-Path $edgeContext 'edge-package.deb')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'issue_041_edge_linux.Dockerfile') -Destination (Join-Path $edgeContext 'Dockerfile')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'issue_041_browser_smoke.mjs') -Destination (Join-Path $edgeContext 'issue_041_browser_smoke.mjs')
+        & docker build --tag $edgeImageName $edgeContext
+        if ($LASTEXITCODE -ne 0) { throw '无法构建隔离 Edge 154 Linux smoke 镜像。' }
+        $edgeBrowserVersion = ((& docker run --rm --entrypoint microsoft-edge-stable $edgeImageName --no-sandbox --version) -join '').Trim() -replace '^Microsoft Edge ', ''
+        if ($LASTEXITCODE -ne 0 -or $edgeBrowserVersion -ne '154.0.4258.62') { throw "隔离 Edge 版本不符：$edgeBrowserVersion" }
+
+        $edgeOverride = @(
+            'services:',
+            "  api:`n    environment:`n      APP_ORIGIN: http://localhost:5173",
+            "  edge-smoke:`n    image: $edgeImageName`n    network_mode: service:web`n    environment:`n      TRADEPILOT_ISSUE041_BROWSER_ORIGIN: http://localhost:5173`n      TRADEPILOT_ISSUE041_BROWSER_PASSWORD: $env:DEMO_PASSWORD`n    volumes:`n      - ./artifacts:/reports"
+        ) -join "`n"
+        $edgeOverrideFile = Join-Path ([System.IO.Path]::GetTempPath()) "compose-edge-$projectName.yaml"
+        try {
+            $edgeOverride | Set-Content -LiteralPath $edgeOverrideFile -Encoding utf8
+            $edgeComposeArgs = @('compose', '--project-name', $projectName, '--env-file', 'backend/.env', '--file', 'compose.yaml', '--file', $overrideFile, '--file', $edgeOverrideFile)
+            & docker @edgeComposeArgs config --quiet
+            if ($LASTEXITCODE -ne 0) { throw 'Edge 154 隔离 smoke Compose 配置无效。' }
+            & docker @edgeComposeArgs up --detach --wait api web
+            if ($LASTEXITCODE -ne 0) { throw 'Edge 154 浏览器测试所需的 API/前端未就绪。' }
+            $edgeReportContainerPath = "/reports/performance/$projectName"
+            & docker @edgeComposeArgs run --rm --no-deps edge-smoke --browser /usr/bin/microsoft-edge-stable --name Edge --version $edgeBrowserVersion --report-root $edgeReportContainerPath
+            if ($LASTEXITCODE -ne 0) { throw 'Edge 154 Linux 浏览器 smoke 失败。' }
+            $edgeResultPath = Join-Path $reportPath "edge-$edgeBrowserVersion-browser-smoke.json"
+            $edgeResult = Get-Content -LiteralPath $edgeResultPath -Raw | ConvertFrom-Json
+            $edgeResult | Add-Member -NotePropertyName platform -NotePropertyValue 'linux-container' -Force
+            $versionResults = @($browserResults.Edge.versions) + @($edgeResult)
+            $majorVersions = @($versionResults | ForEach-Object { [int](($_.version -split '\.')[0]) } | Sort-Object -Unique)
+            $previousMajorAvailable = $majorVersions.Count -ge 2 -and ($majorVersions -contains ($majorVersions[-1] - 1))
+            $browserResults.Edge = @{ status = if ($previousMajorAvailable) { 'tested' } else { 'incomplete' }; versions = $versionResults }
+            if (-not $previousMajorAvailable) { Write-Warning 'Edge 前一主版本测试未能与当前系统版本形成相邻版本矩阵。' }
+        }
+        finally {
+            Remove-Item -LiteralPath $edgeOverrideFile -ErrorAction SilentlyContinue
+            & docker image rm $edgeImageName 2>$null | Out-Null
+        }
+    }
+    foreach ($browserName in @('Chrome', 'Edge')) {
+        if ($browserResults[$browserName].status -ne 'tested') { $browserFailures += "$browserName 当前版/前一主版本兼容矩阵未完成。" }
+    }
     [ordered]@{ checked_at_utc = [DateTimeOffset]::UtcNow.ToString('o'); url = "http://localhost:$env:WEB_PORT/login?redirect=/orders"; flows = @('真实登录', '订单中心读取', '新任务工作台加载'); browser_matrix = $browserResults } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $reportPath 'browser-compatibility.json') -Encoding utf8
     if ($browserFailures.Count) { throw "浏览器验收有失败项：$($browserFailures -join '；')" }
 }
@@ -223,6 +274,7 @@ try {
         catch { Write-Warning "只清理本次隔离项目 $projectName 失败；核查报告目录。" }
         & docker image rm $imageName 2>$null | Out-Null
         & docker image rm $webImageName 2>$null | Out-Null
+        & docker image rm $edgeImageName 2>$null | Out-Null
         Pop-Location
     }
 }
