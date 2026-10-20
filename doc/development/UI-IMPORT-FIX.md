@@ -18,4 +18,4 @@
 - 规则阻断任务页可正常打开，显示“所选物料未配置在该合同中”，不再停留在读取状态。
 - 当前浏览器下拉框实际为 `base-select`，控件字体为 14px；已检查展开面板截图。
 
-可直接上传的合成示例见 [`code/examples/README.md`](../../code/examples/README.md)。最终界面证据保存在 Git 忽略的 `code/artifacts/performance/ui-review-20261020/`。
+可直接上传的合成示例见 [`code/examples/README.md`](../../code/examples/README.md)。完整界面证据保存在 Git 忽略的 `code/artifacts/performance/ui-review-20261020/`；其中[正常批次待审批截图](../images/runtime/batch-waiting-approval.png)已归档到文档目录，供 README 引用。
