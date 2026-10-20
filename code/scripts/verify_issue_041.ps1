@@ -191,9 +191,15 @@ function Test-ResponsiveBrowser {
     }
     if ($feedbackSamples.Count -ne 8) { $browserFailures += "页面反馈测量样本数为 $($feedbackSamples.Count)，预期 8 个浏览器/视口样本。" }
     $feedbackOrdered = @($feedbackSamples | Sort-Object)
+    $feedbackP50 = if ($feedbackOrdered.Count -gt 0) {
+        if ($feedbackOrdered.Count % 2 -eq 0) {
+            ($feedbackOrdered[[int]($feedbackOrdered.Count / 2 - 1)] + $feedbackOrdered[[int]($feedbackOrdered.Count / 2)]) / 2
+        }
+        else { $feedbackOrdered[[int][Math]::Floor($feedbackOrdered.Count / 2)] }
+    } else { $null }
     $feedbackP95 = if ($feedbackOrdered.Count) { $feedbackOrdered[[Math]::Min($feedbackOrdered.Count - 1, [Math]::Ceiling($feedbackOrdered.Count * 0.95) - 1)] } else { [double]::PositiveInfinity }
     if ($feedbackP95 -gt 300) { $browserFailures += "页面交互处理中反馈 P95 为 $([Math]::Round($feedbackP95, 3))ms，超过 300ms。" }
-    $feedbackReport = [ordered]@{ action = '点击订单中心刷新列表并显示读取中状态'; sample_count = $feedbackOrdered.Count; threshold_ms = 300; p50_ms = if ($feedbackOrdered.Count) { $feedbackOrdered[[int][Math]::Floor(($feedbackOrdered.Count - 1) / 2)] } else { $null }; p95_ms = if ($feedbackOrdered.Count) { [Math]::Round($feedbackP95, 3) } else { $null }; max_ms = if ($feedbackOrdered.Count) { [Math]::Round($feedbackOrdered[-1], 3) } else { $null }; response_time_excluded = $true; result = if ($feedbackP95 -le 300 -and $feedbackOrdered.Count -eq 8) { 'passed' } else { 'failed' } }
+    $feedbackReport = [ordered]@{ action = '点击订单中心刷新列表并显示读取中状态'; sample_count = $feedbackOrdered.Count; threshold_ms = 300; p50_ms = if ($null -ne $feedbackP50) { [Math]::Round($feedbackP50, 3) } else { $null }; p95_ms = if ($feedbackOrdered.Count) { [Math]::Round($feedbackP95, 3) } else { $null }; max_ms = if ($feedbackOrdered.Count) { [Math]::Round($feedbackOrdered[-1], 3) } else { $null }; response_time_excluded = $true; result = if ($feedbackP95 -le 300 -and $feedbackOrdered.Count -eq 8) { 'passed' } else { 'failed' } }
     [ordered]@{ checked_at_utc = [DateTimeOffset]::UtcNow.ToString('o'); url = "http://localhost:$env:WEB_PORT/login?redirect=/orders"; flows = @('真实登录', '订单中心读取', '新任务工作台加载', '点击刷新后 300ms 内显示处理中反馈'); interaction_feedback = $feedbackReport; browser_matrix = $browserResults } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $reportPath 'browser-compatibility.json') -Encoding utf8
     if ($browserFailures.Count) { throw "浏览器验收有失败项：$($browserFailures -join '；')" }
 }
