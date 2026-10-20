@@ -226,3 +226,4 @@ __marimo__/
 code/frontend/node_modules/
 code/frontend/dist/
 code/artifacts/evals/
+code/artifacts/performance/
