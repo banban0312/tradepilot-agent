@@ -58,8 +58,9 @@ async def test_real_task_api_worker_model_and_mcp_flow_creates_only_a_draft() ->
                 "input": {
                     "text": (
                         "请查询并使用客户 TP-DEMO-CUST-N1（华北示例客户）、销售合同 "
-                        "TP-DEMO-SALES-N1 和项目 TP-DEMO-PROJ-N1。商品为螺纹钢 "
-                        "HRB400 12mm，数量 2 吨，交期 2026 年 10 月 25 日，送至 "
+                        "TP-DEMO-SALES-N1 和项目 TP-DEMO-PROJ-N1。物料名称字段必须严格为"
+                        "螺纹钢，规格字段单独填写 HRB400 12mm，不得将规格拼入物料名称。"
+                        "数量 2 吨，交期 2026 年 10 月 25 日，送至 "
                         "北京市朝阳区示例工地，联系人张先生。单价必须来自合同主数据。"
                         "请通过可用业务工具查询事实、保存草稿并核验合同余额；只生成草稿，"
                         "不得审批或创建正式订单。"
