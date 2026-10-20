@@ -10,11 +10,6 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from mcp import Client
-from mcp.client.streamable_http import streamable_http_client
-from pydantic import SecretStr, ValidationError
-from sqlalchemy import delete, func, select
-
 from app.auth.context import BUSINESS_OPERATOR, AuthContext
 from app.config import settings
 from app.database import async_session_factory
@@ -48,6 +43,10 @@ from app.models import (
     UserDepartmentScope,
     UserRole,
 )
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from pydantic import SecretStr, ValidationError
+from sqlalchemy import delete, func, select
 
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:8001/mcp")
 
@@ -179,8 +178,10 @@ def test_context_signature_expiry_tamper_and_client_schema_validation(
     assert verified.actor_id == actor_id
     assert verified.task_id == task_id
     assert verified.execution_epoch == 3
+    payload, signature = token.split(".", 1)
+    tampered_payload = payload[:-1] + ("A" if payload[-1] != "A" else "B")
     with pytest.raises(MCPContextError, match="签名无效"):
-        verify_tool_context(token[:-1] + ("A" if token[-1] != "A" else "B"), now=now)
+        verify_tool_context(f"{tampered_payload}.{signature}", now=now)
     with pytest.raises(MCPContextError, match="已过期"):
         verify_tool_context(token, now=now + timedelta(seconds=46))
     with pytest.raises(ValueError, match="有效期"):

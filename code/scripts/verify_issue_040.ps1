@@ -1,0 +1,193 @@
+param(
+    [switch]$SkipEvaluation,
+    [string[]]$IssueTests
+)
+
+$ErrorActionPreference = 'Stop'
+$codeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$envFile = Join-Path $codeRoot 'backend/.env'
+$projectName = 'tp-issue037-issue040-' + [Guid]::NewGuid().ToString('N').ToLowerInvariant()
+$imageName = "tradepilot/backend:verify-$projectName"
+$reportRoot = Join-Path $codeRoot 'artifacts/evals'
+$reportPath = Join-Path $reportRoot $projectName
+$reportDirectory = "/workspace/artifacts/evals/$projectName"
+$overrideFile = Join-Path ([System.IO.Path]::GetTempPath()) "compose-$projectName.yaml"
+$composeArgs = @('compose', '--project-name', $projectName, '--env-file', 'backend/.env', '--file', 'compose.yaml', '--file', $overrideFile)
+
+if (-not (Test-Path -LiteralPath $envFile)) {
+    throw '未找到 code/backend/.env；请先按 backend/.env.example 配置本机验收环境。'
+}
+
+$environmentNames = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_ALLOW_SELF_APPROVAL', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'MCP_CONTEXT_SIGNING_KEY', 'RUNTIME_CONFIG_ENCRYPTION_KEY', 'EVAL_API_URL', 'EVAL_DATABASE_HOST', 'EVAL_PROJECT_NAME', 'TRADEPILOT_EVAL_SANDBOX', 'TRADEPILOT_SERVICE_RESTART_WAIT_KIND', 'TRADEPILOT_SERVICE_RESTART_STATE_PATH', 'TRADEPILOT_SERVICE_RESTART_COUNT')
+$oldEnvironment = @{}
+foreach ($name in $environmentNames) {
+    $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+
+function Get-FreeLocalPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    try { $listener.Start(); return [string]$listener.LocalEndpoint.Port }
+    finally { $listener.Stop() }
+}
+
+function Invoke-Compose {
+    param([string[]]$Arguments)
+    & docker @composeArgs @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "隔离 Compose 命令失败，退出码 $LASTEXITCODE：$($Arguments -join ' ')" }
+}
+
+function Reset-VerificationDatabase {
+    Invoke-Compose @('down', '--volumes', '--remove-orphans')
+    Invoke-Compose @('up', '--detach', '--wait', 'db', 'mcp', 'api')
+    Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'upgrade', 'head')
+    Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'check')
+    Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'app.seed')
+}
+
+try {
+    $ports = @()
+    while ($ports.Count -lt 3) {
+        $candidate = Get-FreeLocalPort
+        if ($candidate -notin $ports) { $ports += $candidate }
+    }
+    $env:POSTGRES_PORT = $ports[0]
+    $env:API_PORT = $ports[1]
+    $env:MCP_HOST_PORT = $ports[2]
+    $env:APP_ORIGIN = 'http://localhost:5173'
+    $env:DEMO_MODE = 'true'
+    $env:DEMO_ALLOW_SELF_APPROVAL = 'false'
+    $env:DEMO_PASSWORD = 'TP-Verify-' + [Guid]::NewGuid().ToString('N')
+    $env:SESSION_COOKIE_SECURE = 'false'
+    $env:TRADEPILOT_TEST_MODE = '1'
+    $env:TRADEPILOT_MCP_INTEGRATION = '1'
+    $env:EVAL_API_URL = 'http://api:8000'
+    $env:EVAL_DATABASE_HOST = 'db'
+    $env:EVAL_PROJECT_NAME = $projectName
+    $env:TRADEPILOT_EVAL_SANDBOX = '1'
+    $env:TRADEPILOT_SERVICE_RESTART_STATE_PATH = "$reportDirectory/service-restarts/state.json"
+    $restartEvidencePath = Join-Path $reportPath 'service-restarts/state.json'
+    $key = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
+    $env:MCP_CONTEXT_SIGNING_KEY = [Convert]::ToBase64String($key)
+    $env:RUNTIME_CONFIG_ENCRYPTION_KEY = [Convert]::ToBase64String($key).Replace('+', '-').Replace('/', '_')
+    [Array]::Clear($key, 0, $key.Length)
+
+    @(
+        'services:',
+        "  api:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
+        "  mcp:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
+        "  worker:`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
+        "  verify:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''`n      EVAL_API_URL: $env:EVAL_API_URL`n      EVAL_DATABASE_HOST: $env:EVAL_DATABASE_HOST`n      EVAL_PROJECT_NAME: $env:EVAL_PROJECT_NAME`n      TRADEPILOT_EVAL_SANDBOX: '1'`n      TRADEPILOT_SERVICE_RESTART_WAIT_KIND: `${TRADEPILOT_SERVICE_RESTART_WAIT_KIND:-}`n      TRADEPILOT_SERVICE_RESTART_STATE_PATH: $env:TRADEPILOT_SERVICE_RESTART_STATE_PATH`n      TRADEPILOT_SERVICE_RESTART_COUNT: `${TRADEPILOT_SERVICE_RESTART_COUNT:-}`n      PYTHONPATH: /workspace:/app`n      MCP_CONTEXT_SIGNING_KEY: $env:MCP_CONTEXT_SIGNING_KEY`n      RUNTIME_CONFIG_ENCRYPTION_KEY: $env:RUNTIME_CONFIG_ENCRYPTION_KEY`n    volumes:`n      - ./artifacts/evals:/workspace/artifacts/evals"
+    ) -join "`n" | Set-Content -LiteralPath $overrideFile -Encoding utf8
+
+    Push-Location $codeRoot
+    try {
+        Write-Host "使用独立 Compose 项目 $projectName；不重启、清理或写入现有开发服务。"
+        if (Test-Path -LiteralPath $reportPath) {
+            throw "评测证据目录已存在，停止以保护现有报告：$reportPath"
+        }
+        New-Item -ItemType Directory -Path $reportPath | Out-Null
+        Invoke-Compose @('config', '--quiet')
+        Invoke-Compose @('build', 'api')
+        Invoke-Compose @('up', '--detach', '--wait', 'db', 'mcp', 'api')
+        Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'upgrade', 'head')
+        Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'check')
+        Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'app.seed')
+
+        if (-not $SkipEvaluation) {
+            Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'evals.runner', '--mode', 'offline', '--dataset', 'v1', '--report-dir', $reportDirectory)
+            Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-c', "import json; from pathlib import Path; p=Path('$reportDirectory/summary.json'); s=json.loads(p.read_text()); assert s['case_count']==41 and s['status_counts'].get('PASS')==41 and sum(s['status_counts'].values())==41; print('固定离线案例：41/41 PASS')")
+
+            # 评测会写入任务与审计事实；回归必须从干净的演示数据库开始。
+            Reset-VerificationDatabase
+        }
+
+        $defaultIssueTests = @(
+            'test_issue_009.py',
+            'test_issue_010.py',
+            'test_issue_008.py',
+            'test_issue_013.py',
+            'test_issue_014.py',
+            'test_issue_015.py',
+            'test_issue_016.py',
+            'test_issue_017.py',
+            'test_issue_020.py',
+            'test_issue_022.py',
+            'test_issue_023.py',
+            'test_issue_024.py',
+            'test_issue_025.py',
+            'test_issue_029.py',
+            'test_issue_037.py',
+            'test_issue_038.py',
+            'test_issue_040.py'
+        )
+        if (-not $IssueTests -or $IssueTests.Count -eq 0) { $IssueTests = $defaultIssueTests }
+        $regressionFiles = @($IssueTests | ForEach-Object {
+            if ($_ -match '^/workspace/tests/issues/') { $_ }
+            elseif ($_ -match '^test_issue_\d{3}\.py$') { "/workspace/tests/issues/$_" }
+            else { throw "无效的 issue 测试文件名：$_" }
+        })
+        $isolatedRegression = @($regressionFiles | Where-Object { $_ -match '/test_issue_(029|040)\.py$' })
+        $otherRegressionFiles = @($regressionFiles | Where-Object { $_ -notmatch '/test_issue_(029|040)\.py$' })
+        if ($otherRegressionFiles.Count -gt 0) {
+            Invoke-Compose (@('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short') + $otherRegressionFiles)
+        }
+        foreach ($isolatedFile in $isolatedRegression) {
+            if ($otherRegressionFiles.Count -gt 0 -or $isolatedFile -ne $isolatedRegression[0]) {
+                # #29/#40 断言空闲任务槽与批次竞争；每项从独立干净数据库开始。
+                Reset-VerificationDatabase
+            }
+            Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', $isolatedFile)
+        }
+
+        if ($regressionFiles -contains '/workspace/tests/issues/test_issue_040.py') {
+            # 重启验收使用空数据库和真实 Compose Worker 服务；两个等待态分别重启十次。
+            Reset-VerificationDatabase
+            foreach ($waitKind in @('INPUT', 'APPROVAL')) {
+                $env:TRADEPILOT_SERVICE_RESTART_WAIT_KIND = $waitKind
+                $env:TRADEPILOT_SERVICE_RESTART_COUNT = '10'
+                $stateFileName = "state-$($waitKind.ToLowerInvariant()).json"
+                $env:TRADEPILOT_SERVICE_RESTART_STATE_PATH = "$reportDirectory/service-restarts/$stateFileName"
+                $restartEvidencePath = Join-Path (Join-Path $reportPath 'service-restarts') $stateFileName
+                $restartTestEnvironment = @('--env', "TRADEPILOT_SERVICE_RESTART_WAIT_KIND=$waitKind", '--env', "TRADEPILOT_SERVICE_RESTART_STATE_PATH=$env:TRADEPILOT_SERVICE_RESTART_STATE_PATH", '--env', 'TRADEPILOT_SERVICE_RESTART_COUNT=10')
+                Invoke-Compose (@('run', '--rm', '--no-deps') + $restartTestEnvironment + @('verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', '/workspace/tests/issues/test_issue_040.py::test_prepare_wait_state_for_real_worker_restart'))
+                Invoke-Compose @('up', '--detach', '--wait', 'worker')
+                for ($restart = 1; $restart -le 10; $restart++) {
+                    Write-Host "Compose Worker 服务重启：$waitKind $restart/10"
+                    Invoke-Compose @('restart', '--timeout', '20', 'worker')
+                    Invoke-Compose @('exec', '--no-TTY', 'worker', 'uv', 'run', '--frozen', 'python', '-m', 'app.worker.healthcheck')
+                }
+                $restartEvidence = Get-Content -LiteralPath $restartEvidencePath -Raw | ConvertFrom-Json
+                $restartEvidence.restart_count = $restart - 1
+                $restartEvidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $restartEvidencePath -Encoding utf8
+                Invoke-Compose (@('run', '--rm', '--no-deps') + $restartTestEnvironment + @('verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', '/workspace/tests/issues/test_issue_040.py::test_wait_state_and_checkpoint_survive_real_worker_service_restarts'))
+                Write-Host "等待态重启证据：$restartEvidencePath"
+                Invoke-Compose @('stop', 'worker')
+            }
+        }
+    }
+    catch {
+        Write-Host $_ -ForegroundColor Red
+        & docker @composeArgs logs --tail 80 --no-color db eval-db api mcp 2>$null
+        throw
+    }
+    finally {
+        try {
+            Invoke-Compose @('down', '--volumes', '--remove-orphans')
+        }
+        catch {
+            Write-Warning "隔离项目 $projectName 清理失败；只清理此项目关联资源。"
+        }
+        finally {
+            & docker image rm $imageName 2>$null | Out-Null
+            Pop-Location
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath $overrideFile -ErrorAction SilentlyContinue
+    foreach ($name in $environmentNames) {
+        if ($null -eq $oldEnvironment[$name]) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+        else { Set-Item "Env:$name" $oldEnvironment[$name] }
+    }
+}
