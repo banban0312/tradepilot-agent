@@ -141,7 +141,10 @@ async def test_import_batch_persistence_idempotency_concurrency_and_stop() -> No
             created_audits = await session.scalar(
                 select(func.count())
                 .select_from(AuditEvent)
-                .where(AuditEvent.action == "import.batch_created")
+                .where(
+                    AuditEvent.action == "import.batch_created",
+                    AuditEvent.object_ref["batch_id"].astext == str(batch_id),
+                )
             )
             assert created_audits == 1
 
@@ -182,7 +185,10 @@ async def test_import_batch_persistence_idempotency_concurrency_and_stop() -> No
             stop_audits = await session.scalar(
                 select(func.count())
                 .select_from(AuditEvent)
-                .where(AuditEvent.action == "import.batch_stop_requested")
+                .where(
+                    AuditEvent.action == "import.batch_stop_requested",
+                    AuditEvent.object_ref["batch_id"].astext == str(batch_id),
+                )
             )
             assert stop_audits == 1
 

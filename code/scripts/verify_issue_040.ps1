@@ -1,9 +1,12 @@
-param()
+param(
+    [switch]$SkipEvaluation,
+    [string[]]$IssueTests
+)
 
 $ErrorActionPreference = 'Stop'
 $codeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $envFile = Join-Path $codeRoot 'backend/.env'
-$projectName = 'tp-issue040-regression-' + [Guid]::NewGuid().ToString('N').ToLowerInvariant()
+$projectName = 'tp-issue037-issue040-' + [Guid]::NewGuid().ToString('N').ToLowerInvariant()
 $imageName = "tradepilot/backend:verify-$projectName"
 $reportRoot = Join-Path $codeRoot 'artifacts/evals'
 $reportPath = Join-Path $reportRoot $projectName
@@ -31,6 +34,14 @@ function Invoke-Compose {
     param([string[]]$Arguments)
     & docker @composeArgs @Arguments
     if ($LASTEXITCODE -ne 0) { throw "隔离 Compose 命令失败，退出码 $LASTEXITCODE：$($Arguments -join ' ')" }
+}
+
+function Reset-VerificationDatabase {
+    Invoke-Compose @('down', '--volumes', '--remove-orphans')
+    Invoke-Compose @('up', '--detach', '--wait', 'db', 'mcp', 'api')
+    Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'upgrade', 'head')
+    Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'check')
+    Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'app.seed')
 }
 
 try {
@@ -80,33 +91,55 @@ try {
         Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'alembic', 'check')
         Invoke-Compose @('run', '--rm', '--no-deps', 'api', 'uv', 'run', '--frozen', 'python', '-m', 'app.seed')
 
-        Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'evals.runner', '--mode', 'offline', '--dataset', 'v1', '--report-dir', $reportDirectory)
-        Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-c', "import json; from pathlib import Path; p=Path('$reportDirectory/summary.json'); s=json.loads(p.read_text()); assert s['case_count']==41 and s['status_counts'].get('PASS')==41 and sum(s['status_counts'].values())==41; print('固定离线案例：41/41 PASS')")
+        if (-not $SkipEvaluation) {
+            Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'evals.runner', '--mode', 'offline', '--dataset', 'v1', '--report-dir', $reportDirectory)
+            Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-c', "import json; from pathlib import Path; p=Path('$reportDirectory/summary.json'); s=json.loads(p.read_text()); assert s['case_count']==41 and s['status_counts'].get('PASS')==41 and sum(s['status_counts'].values())==41; print('固定离线案例：41/41 PASS')")
 
-        $regressionFiles = @(
-            '/workspace/tests/issues/test_issue_009.py',
-            '/workspace/tests/issues/test_issue_010.py',
-            '/workspace/tests/issues/test_issue_008.py',
-            '/workspace/tests/issues/test_issue_013.py',
-            '/workspace/tests/issues/test_issue_014.py',
-            '/workspace/tests/issues/test_issue_015.py',
-            '/workspace/tests/issues/test_issue_016.py',
-            '/workspace/tests/issues/test_issue_017.py',
-            '/workspace/tests/issues/test_issue_020.py',
-            '/workspace/tests/issues/test_issue_022.py',
-            '/workspace/tests/issues/test_issue_023.py',
-            '/workspace/tests/issues/test_issue_024.py',
-            '/workspace/tests/issues/test_issue_025.py',
-            '/workspace/tests/issues/test_issue_029.py',
-            '/workspace/tests/issues/test_issue_037.py',
-            '/workspace/tests/issues/test_issue_038.py',
-            '/workspace/tests/issues/test_issue_040.py'
+            # 评测会写入任务与审计事实；回归必须从干净的演示数据库开始。
+            Reset-VerificationDatabase
+        }
+
+        $defaultIssueTests = @(
+            'test_issue_009.py',
+            'test_issue_010.py',
+            'test_issue_008.py',
+            'test_issue_013.py',
+            'test_issue_014.py',
+            'test_issue_015.py',
+            'test_issue_016.py',
+            'test_issue_017.py',
+            'test_issue_020.py',
+            'test_issue_022.py',
+            'test_issue_023.py',
+            'test_issue_024.py',
+            'test_issue_025.py',
+            'test_issue_029.py',
+            'test_issue_037.py',
+            'test_issue_038.py',
+            'test_issue_040.py'
         )
-        Invoke-Compose (@('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x') + $regressionFiles)
+        if (-not $IssueTests -or $IssueTests.Count -eq 0) { $IssueTests = $defaultIssueTests }
+        $regressionFiles = @($IssueTests | ForEach-Object {
+            if ($_ -match '^/workspace/tests/issues/') { $_ }
+            elseif ($_ -match '^test_issue_\d{3}\.py$') { "/workspace/tests/issues/$_" }
+            else { throw "无效的 issue 测试文件名：$_" }
+        })
+        $isolatedRegression = @($regressionFiles | Where-Object { $_ -match '/test_issue_(029|040)\.py$' })
+        $otherRegressionFiles = @($regressionFiles | Where-Object { $_ -notmatch '/test_issue_(029|040)\.py$' })
+        if ($otherRegressionFiles.Count -gt 0) {
+            Invoke-Compose (@('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short') + $otherRegressionFiles)
+        }
+        foreach ($isolatedFile in $isolatedRegression) {
+            if ($otherRegressionFiles.Count -gt 0 -or $isolatedFile -ne $isolatedRegression[0]) {
+                # #29/#40 断言空闲任务槽与批次竞争；每项从独立干净数据库开始。
+                Reset-VerificationDatabase
+            }
+            Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', $isolatedFile)
+        }
     }
     catch {
         Write-Host $_ -ForegroundColor Red
-        & docker @composeArgs logs --no-color db eval-db api mcp 2>$null
+        & docker @composeArgs logs --tail 80 --no-color db eval-db api mcp 2>$null
         throw
     }
     finally {

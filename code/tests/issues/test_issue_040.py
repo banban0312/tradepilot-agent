@@ -43,7 +43,7 @@ _PROJECT = UUID("00000000-0000-4000-8000-000000000020")
 _MATERIAL = UUID("00000000-0000-4000-8000-000000000030")
 
 
-async def _prepare_batch_child(task_id: UUID, contract_id: UUID):
+async def _prepare_batch_child(task_id: UUID, contract_id: UUID, actor):
     checkpoint, interrupt = f"issue040-cp-{uuid4()}", f"issue040-int-{uuid4()}"
     draft_id, command_id, approval_id = uuid4(), uuid4(), uuid4()
     candidate = CandidateOrder(
@@ -93,7 +93,7 @@ async def _prepare_batch_child(task_id: UUID, contract_id: UUID):
             draft_id=draft_id,
             expected_version=0,
             candidate=candidate,
-            actor=_NORTH_OWNER,
+            actor=actor,
         )
         payload = {
             "decision": "APPROVE",
@@ -115,6 +115,7 @@ async def _prepare_batch_child(task_id: UUID, contract_id: UUID):
                 payload_hash=hashlib.sha256(str(payload).encode()).hexdigest(),
             )
         )
+        await session.flush()
         session.add(
             TaskApproval(
                 id=approval_id,
@@ -158,7 +159,9 @@ async def test_batch_children_competing_for_one_contract_cannot_overoccupy_quota
     """真实导入批次的两个子任务并发提交同一合同，只允许一笔占额成功。"""
     issue016 = runpy.run_path(str(Path(__file__).with_name("test_issue_016.py")))
     issue029 = runpy.run_path(str(Path(__file__).with_name("test_issue_029.py")))
-    contract_id, _ = await issue016["_new_contract"]()
+    contract_id, _ = await issue016["_new_contract"](
+        total_amount=Decimal("250000.00")
+    )
     async with async_session_factory() as session:
         contract = await session.get(Contract, contract_id)
         assert contract is not None
@@ -193,19 +196,37 @@ async def test_batch_children_competing_for_one_contract_cannot_overoccupy_quota
             ).all()
         )
         assert len(items) == 2
-        assert all(item.task_id is not None for item in items)
+        assert all(item.task_id is not None for item in items), [
+            (item.group_id, item.preview_status, item.candidate_json)
+            for item in items
+            if item.task_id is None
+        ]
         assert all(item.preview_status == "READY_FOR_REVIEW" for item in items)
         assert {item.candidate_json["contract_id"] for item in items} == {
             str(contract_id)
         }
 
+    # 预览阶段允许两笔各 10 万的订单进入审核；随后额度收紧到 15 万，
+    # 验证最终提交事务会重新核验共享合同，而不是信任旧预览结果。
+    async with async_session_factory() as session, session.begin():
+        contract = await session.get(Contract, contract_id)
+        assert contract is not None
+        contract.total_amount = Decimal("150000.00")
+
     prepared = [
-        await _prepare_batch_child(item.task_id, contract_id)
+        await _prepare_batch_child(item.task_id, contract_id, issue016["_OWNER"])
         for item in items
         if item.task_id is not None
     ]
     results = await asyncio.gather(*[_commit_batch_child(row) for row in prepared])
     assert sorted(result.state for result in results) == ["BLOCKED_RULE", "COMPLETED"]
+    # 直接调用事务函数绕过 Worker 图投影；同步写入其正常完成后会投影的任务状态，
+    # 以真实 API 回读批次聚合状态与数据库业务事实。
+    async with async_session_factory() as session, session.begin():
+        for row, result in zip(prepared, results, strict=True):
+            task = await session.get(AgentTask, row[0])
+            assert task is not None
+            task.state = result.state
 
     task_ids = [row[0] for row in prepared]
     blocked = prepared[

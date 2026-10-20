@@ -179,8 +179,10 @@ def test_context_signature_expiry_tamper_and_client_schema_validation(
     assert verified.actor_id == actor_id
     assert verified.task_id == task_id
     assert verified.execution_epoch == 3
+    payload, signature = token.split(".", 1)
+    tampered_payload = payload[:-1] + ("A" if payload[-1] != "A" else "B")
     with pytest.raises(MCPContextError, match="签名无效"):
-        verify_tool_context(token[:-1] + ("A" if token[-1] != "A" else "B"), now=now)
+        verify_tool_context(f"{tampered_payload}.{signature}", now=now)
     with pytest.raises(MCPContextError, match="已过期"):
         verify_tool_context(token, now=now + timedelta(seconds=46))
     with pytest.raises(ValueError, match="有效期"):
