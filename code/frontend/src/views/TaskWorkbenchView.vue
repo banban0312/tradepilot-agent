@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import NoticeBanner from '../components/NoticeBanner.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import { fieldLabel } from '../utils/fieldLabels'
 import { useAuthStore } from '../stores/auth'
 import { useTaskWorkspaceStore, type WorkspaceEvent } from '../stores/taskWorkspace'
 import { artifactsApi, type Artifact, type ParseResult, type ParsedField } from '../services/artifacts'
@@ -61,6 +62,11 @@ let taskGeneration = 0
 let failureSpanGeneration = 0
 
 const pageMode = computed(() => typeof route.params.taskId === 'string' ? 'task' : 'home')
+const isBatchEntry = computed(() => route.name === 'batch-import')
+// 同一工作台组件承载两个入口，路由切换时同步输入面板。
+watch(() => route.name, () => {
+  if (pageMode.value === 'home') inputMode.value = isBatchEntry.value ? 'excel' : 'text'
+}, { immediate: true })
 const isDirty = computed(() => workspace.draftIsDirty)
 const canReply = computed(() => Boolean(task.value?.active_wait?.kind === 'INPUT' && task.value.available_actions.includes('INPUT')))
 const canEditDraft = computed(() => Boolean(task.value?.available_actions.includes('EDIT_DRAFT') && task.value.draft?.candidate))
@@ -180,19 +186,6 @@ function editableCandidate(candidate: DraftCandidate) {
     business_fields: candidate.business_fields,
     items: candidate.items,
   }
-}
-
-function fieldLabel(field: string) {
-  const labels: Record<string, string> = {
-    order_type: '订单类型', contract_id: '合同', customer_id: '客户', project_id: '项目', currency: '币种',
-    delivery_date: '交期', address: '收货地址', contact: '联系人', total_amount: '订单金额',
-  }
-  const itemMatch = field.match(/^items\[(\d+)](?:\.(.+))?$/)
-  if (itemMatch) {
-    const itemName: Record<string, string> = { raw_name: '物料名称', specification: '规格', quantity: '数量', unit: '单位', unit_price: '单价' }
-    return `第 ${Number(itemMatch[1]) + 1} 项${itemMatch[2] ? ` · ${itemName[itemMatch[2]] ?? itemMatch[2]}` : ''}`
-  }
-  return labels[field] ?? field
 }
 
 function formatMoney(value: string | number | null | undefined) {
@@ -367,6 +360,20 @@ async function processExcel(file?: File) {
   excelStatus.value = '正在校验工作表、分组和单元格…'
   excelPreview.value = { ...(await importsApi.previewArtifact(excelArtifactId.value)), artifact_id: excelArtifactId.value }
   excelStatus.value = '分组校验完成；尚未创建订单或提交审批。'
+}
+
+async function downloadExcelTemplate() {
+  try {
+    const blob = await importsApi.downloadTemplate()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'TradePilot-订单导入模板.xlsx'
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '模板下载失败，请重试。'
+  }
 }
 
 async function createExcelBatch() {
@@ -808,9 +815,9 @@ async function switchToWidget() {
 <template>
   <section v-if="pageMode === 'home'" class="page-heading">
     <div>
-      <p class="eyebrow">工作空间 / 智能提单</p>
-      <h1>开始一笔新订单</h1>
-      <p class="page-description">用自然语言描述业务需求；任务、草稿和审批状态均来自服务端。</p>
+      <p class="eyebrow">工作空间 / {{ isBatchEntry ? '批量导入' : '智能提单' }}</p>
+      <h1>{{ isBatchEntry ? '批量导入订单' : '开始一笔新订单' }}</h1>
+      <p class="page-description">{{ isBatchEntry ? '下载模板并上传 Excel，按订单组校验字段和额度，再逐笔核对、审批。' : '用自然语言描述业务需求；任务、草稿和审批状态均来自服务端。' }}</p>
     </div>
     <div class="page-heading__actions">
       <button class="secondary-button" type="button" :disabled="loading" @click="continueLastTask"><AppIcon name="history" :size="17" />继续上次任务</button>
@@ -822,23 +829,24 @@ async function switchToWidget() {
     <section class="card task-composer">
       <div class="task-composer__heading">
         <span class="task-composer__icon"><AppIcon name="sparkles" :size="20" /></span>
-        <div><h2>描述订单需求</h2><p>提交后会创建真实任务并由后台处理。</p></div>
+        <div><h2>{{ inputMode === 'excel' ? '上传并校验订单表格' : '描述订单需求' }}</h2><p>{{ inputMode === 'excel' ? '先校验分组与单元格，确认后创建导入批次。' : '提交后会创建真实任务并由后台处理。' }}</p></div>
       </div>
-      <div class="task-type-choice" role="group" aria-label="订单类型">
+      <div v-if="inputMode !== 'excel'" class="task-type-choice" role="group" aria-label="订单类型">
         <button type="button" :class="{ selected: orderType === 'SALES' }" @click="orderType = 'SALES'"><AppIcon name="file" :size="17" />销售订单</button>
         <button type="button" :class="{ selected: orderType === 'PURCHASE' }" @click="orderType = 'PURCHASE'"><AppIcon name="grid" :size="17" />采购订单</button>
       </div>
-      <div class="multimodal-tabs" role="tablist" aria-label="输入方式">
+      <div v-if="!isBatchEntry" class="multimodal-tabs" role="tablist" aria-label="输入方式">
         <button type="button" role="tab" :aria-selected="inputMode === 'text'" :class="{ selected: inputMode === 'text' }" @click="inputMode = 'text'">文本描述</button>
         <button type="button" role="tab" :aria-selected="inputMode === 'document'" :class="{ selected: inputMode === 'document' }" @click="inputMode = 'document'">PDF / 图片</button>
         <button type="button" role="tab" :aria-selected="inputMode === 'excel'" :class="{ selected: inputMode === 'excel' }" @click="inputMode = 'excel'">Excel 批量导入</button>
       </div>
-      <label for="task-description" class="multimodal-description-label">订单需求描述（必填）</label>
-      <textarea id="task-description" v-model="newTaskText" class="task-composer__input" maxlength="12000" placeholder="例如：根据本部门有效合同，为某项目采购 20 吨指定规格的钢材，交期为……" @keydown.ctrl.enter="createTask" @keydown.meta.enter="createTask" />
+      <label v-if="inputMode !== 'excel'" for="task-description" class="multimodal-description-label">订单需求描述（必填）</label>
+      <textarea v-if="inputMode !== 'excel'" id="task-description" v-model="newTaskText" class="task-composer__input" maxlength="12000" placeholder="例如：根据本部门有效合同，为某项目采购 20 吨指定规格的钢材，交期为……" @keydown.ctrl.enter="createTask" @keydown.meta.enter="createTask" />
       <div v-if="inputMode !== 'text'" class="multimodal-panel">
         <div class="multimodal-drop" @dragover.prevent @drop="onFileDrop">
           <strong>{{ inputMode === 'excel' ? '导入订单 Excel' : '上传合同 PDF 或单据图片' }}</strong>
           <span>{{ inputMode === 'excel' ? '仅支持 .xlsx，最大 10 MB' : 'PDF 最大 20 MB；PNG / JPG 最大 10 MB' }}</span>
+          <button v-if="inputMode === 'excel'" class="secondary-button" type="button" @click="downloadExcelTemplate"><AppIcon name="file" :size="16" />下载导入模板</button>
           <input ref="fileInput" class="sr-only" type="file" :accept="inputMode === 'excel' ? '.xlsx' : '.pdf,.png,.jpg,.jpeg'" @change="onFileChange" />
           <button class="secondary-button" type="button" :disabled="fileBusy" @click="fileInput?.click()">{{ fileBusy ? (inputMode === 'excel' ? '正在校验…' : '正在上传 / 解析…') : '选择文件或拖到此处' }}</button>
           <small v-if="inputMode === 'document'">文件只上传一次；切换面板不会重复上传。字段仍需你确认后才会写入草稿。</small>
@@ -858,7 +866,7 @@ async function switchToWidget() {
         </div>
         <button v-if="inputMode === 'excel' && excelArtifactId && !excelPreview && !fileBusy" class="text-button" type="button" @click="retryExcelPreview">重试分组校验</button>
       </div>
-      <div class="task-composer__footer"><span>Ctrl / ⌘ + Enter 提交 · 身份和部门范围由登录会话确定<template v-if="pendingDocumentIds.length"> · 已附 {{ pendingDocumentIds.length }} 个来源文件</template></span><button class="primary-button" type="button" :disabled="sending || !newTaskText.trim() || inputMode === 'excel'" @click="createTask"><AppIcon v-if="!sending" name="arrow" :size="17" />{{ sending ? '正在创建任务…' : inputMode === 'excel' ? '请先完成分组校验' : '开始解析' }}</button></div>
+      <div v-if="inputMode !== 'excel'" class="task-composer__footer"><span>Ctrl / ⌘ + Enter 提交 · 身份和部门范围由登录会话确定<template v-if="pendingDocumentIds.length"> · 已附 {{ pendingDocumentIds.length }} 个来源文件</template></span><button class="primary-button" type="button" :disabled="sending || !newTaskText.trim()" @click="createTask"><AppIcon v-if="!sending" name="arrow" :size="17" />{{ sending ? '正在创建任务…' : '开始解析' }}</button></div>
       <NoticeBanner v-if="errorMessage" tone="danger" :message="errorMessage" />
       <NoticeBanner v-if="noticeMessage" tone="info" :message="noticeMessage" />
     </section>

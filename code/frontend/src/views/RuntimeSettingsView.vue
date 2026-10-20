@@ -114,18 +114,18 @@ onMounted(load)
 .runtime-settings { display: grid; gap: 18px; }
 .runtime-settings__grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(260px, .8fr); align-items: start; gap: 18px; }
 .runtime-settings__form, .runtime-settings__history { padding: 22px; border: 1px solid var(--color-border); border-radius: 8px; background: #fff; }
-.runtime-settings h2 { margin: 0 0 16px; font-size: 16px; }
+.runtime-settings h2 { margin: 0 0 16px; font-size: var(--font-size-md); }
 .runtime-settings h2:not(:first-child) { margin-top: 26px; }
 .runtime-settings__fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.runtime-settings__fields label { display: grid; gap: 6px; color: var(--color-muted); font-size: 12px; }
+.runtime-settings__fields label { display: grid; gap: 6px; color: var(--color-muted); font-size: var(--font-size-sm); }
 .runtime-settings__fields input, .runtime-settings__fields select { min-width: 0; height: 40px; border: 1px solid var(--color-border); border-radius: 5px; padding: 0 10px; color: #172b3a; background: white; }
 .runtime-settings__wide { grid-column: 1 / -1; }
 .runtime-settings__notice { margin-top: 22px; }
-.runtime-settings__footnote, .runtime-settings__empty { color: var(--color-muted); font-size: 12px; line-height: 1.6; }
-.runtime-settings__version { display: grid; gap: 7px; padding: 14px 0; border-bottom: 1px solid var(--color-border); font-size: 12px; }
+.runtime-settings__footnote, .runtime-settings__empty { color: var(--color-muted); font-size: var(--font-size-sm); line-height: 1.6; }
+.runtime-settings__version { display: grid; gap: 7px; padding: 14px 0; border-bottom: 1px solid var(--color-border); font-size: var(--font-size-sm); }
 .runtime-settings__version div { display: flex; justify-content: space-between; }
 .runtime-settings__version small { color: var(--color-muted); }
-.runtime-settings__version code { color: var(--color-muted); font-size: 10px; }
+.runtime-settings__version code { color: var(--color-muted); font-size: var(--font-size-sm); }
 .runtime-settings__current { color: var(--color-success); }
 @media (max-width: 900px) { .runtime-settings__grid { grid-template-columns: 1fr; } }
 @media (max-width: 560px) { .runtime-settings__fields { grid-template-columns: 1fr; } .runtime-settings__wide { grid-column: auto; } }

@@ -23,6 +23,7 @@ export const router = createRouter({
       component: AppShell,
       children: [
         { path: '', name: 'workbench', component: TaskWorkbenchView },
+        { path: 'imports', name: 'batch-import', component: TaskWorkbenchView },
         { path: 'task-history', name: 'task-history', component: TaskHistoryView },
         { path: 'tasks/:taskId/trace', name: 'task-trace', component: TaskTraceView },
         { path: 'tasks/:taskId', name: 'task-workbench', component: TaskWorkbenchView },

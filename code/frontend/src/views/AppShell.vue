@@ -7,11 +7,9 @@ import StatusBadge from '../components/StatusBadge.vue'
 import ToastMessage from '../components/ToastMessage.vue'
 import FloatingTaskWidget from '../components/FloatingTaskWidget.vue'
 import { roleLabels, useAuthStore } from '../stores/auth'
-import { useUiStore } from '../stores/ui'
 import { useTaskWorkspaceStore } from '../stores/taskWorkspace'
 
 const auth = useAuthStore()
-const ui = useUiStore()
 const taskWorkspace = useTaskWorkspaceStore()
 const route = useRoute()
 const router = useRouter()
@@ -25,6 +23,7 @@ const pageTitle = computed(() => {
   if (route.name === 'task-history') return '历史任务'
   if (route.name === 'task-trace') return '任务执行轨迹'
   if (route.name === 'import-batch') return '批量校验与审批'
+  if (route.name === 'batch-import') return '批量导入'
   if (route.name === 'order-center') return '订单中心'
   if (route.name === 'interface-states') return '界面状态与异常反馈'
   if (route.name === 'master-data') return '主数据与配置'
@@ -37,17 +36,13 @@ const pageTitle = computed(() => {
 const navigationItems = [
   { label: '智能提单', icon: 'sparkles', route: 'workbench' },
   { label: '订单中心', icon: 'file', route: 'order-center' },
-  { label: '批量导入', icon: 'grid' },
+  { label: '批量导入', icon: 'grid', route: 'batch-import' },
   { label: '任务追踪', icon: 'trace', route: 'task-history' },
   { label: '评测中心', icon: 'chart', route: 'evaluation-center', adminOnly: true },
   { label: '主数据与配置', icon: 'sliders', route: 'master-data', adminOnly: true },
   { label: '运行参数与审计', icon: 'trace', route: 'runtime-settings', adminOnly: true },
 ]
 const navigation = computed(() => navigationItems.filter((item) => !('adminOnly' in item) || identity.value?.roles.includes('system_admin')))
-
-function unavailable(label: string) {
-  ui.notify(`${label}模块尚未接入，当前没有读取或展示业务数据。`)
-}
 
 async function logout() {
   if (!await auth.logout()) return
@@ -66,12 +61,9 @@ async function logout() {
       <p class="side-navigation__caption">智能商贸提单助手</p>
       <nav class="main-nav">
         <template v-for="item in navigation" :key="item.label">
-          <RouterLink v-if="item.route" :to="{ name: item.route }" class="main-nav__link" :class="{ active: route.name === item.route || (item.route === 'task-history' && route.name === 'task-trace') || (item.route === 'runtime-settings' && route.name === 'audit-log') }">
+          <RouterLink :to="{ name: item.route }" class="main-nav__link" :class="{ active: route.name === item.route || (item.route === 'batch-import' && route.name === 'import-batch') || (item.route === 'task-history' && route.name === 'task-trace') || (item.route === 'runtime-settings' && route.name === 'audit-log') }">
             <AppIcon :name="item.icon" :size="18" /><span>{{ item.label }}</span>
           </RouterLink>
-          <button v-else type="button" class="main-nav__link main-nav__link--future" @click="unavailable(item.label)">
-            <AppIcon :name="item.icon" :size="18" /><span>{{ item.label }}</span>
-          </button>
         </template>
         <RouterLink to="/interface-states" class="main-nav__link main-nav__link--secondary" :class="{ active: route.name === 'interface-states' }">
           <AppIcon name="info" :size="18" /><span>界面状态示例</span>
@@ -115,7 +107,7 @@ async function logout() {
         <li><strong>检查草稿与额度</strong><p>保存后重新校验合同、字段和履约余额。</p></li>
         <li><strong>人工批准后提交</strong><p>模型不能批准或创建正式订单；提交前会校验当前版本与权限。</p></li>
       </ol>
-      <StatusBadge label="任务创建入口将在后续阶段接入" tone="warning" />
+      <StatusBadge label="正式提单前必须完成人工批准" tone="warning" />
     </AppDrawer>
     <ToastMessage />
     <FloatingTaskWidget />

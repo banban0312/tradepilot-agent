@@ -174,61 +174,61 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.order-center__subtitle { margin: 8px 0 0; color: var(--color-muted); font-size: 13px; }
+.order-center__subtitle { margin: 8px 0 0; color: var(--color-muted); font-size: var(--font-size-base); }
 .order-filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: end; gap: 12px; margin-bottom: 17px; padding: 18px; border: 1px solid var(--color-border); border-radius: 7px; background: #fff; }
-.order-filters label { display: grid; min-width: 0; gap: 6px; color: #617888; font-size: 11px; }
-.order-filters input, .order-filters select { width: 100%; min-width: 0; height: 39px; padding: 0 10px; border: 1px solid #dce5ea; border-radius: 5px; background: #fff; color: #263e4d; font: inherit; font-size: 12px; }
+.order-filters label { display: grid; min-width: 0; gap: 6px; color: #617888; font-size: var(--font-size-sm); }
+.order-filters input, .order-filters select { width: 100%; min-width: 0; height: 39px; padding: 0 10px; border: 1px solid #dce5ea; border-radius: 5px; background: #fff; color: #263e4d; font: inherit; font-size: var(--font-size-sm); }
 .order-filter-button { min-height: 39px; padding: 0 12px; }
 .order-clear-button { justify-self: center; min-height: 39px; }
 .order-table-card { margin-top: 0; padding: 19px; }
 .order-table-heading, .order-pagination, .order-pagination > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .order-table-heading { margin-bottom: 14px; }
-.order-table-heading h2 { margin: 0; font-size: 15px; }
-.order-table-heading p, .order-table-heading > span, .order-pagination { margin: 4px 0 0; color: var(--color-muted); font-size: 11px; }
+.order-table-heading h2 { margin: 0; font-size: var(--font-size-md); }
+.order-table-heading p, .order-table-heading > span, .order-pagination { margin: 4px 0 0; color: var(--color-muted); font-size: var(--font-size-sm); }
 .order-data-table th, .order-data-table td { min-width: 90px; }
 .order-data-table th:first-child, .order-data-table td:first-child { min-width: 180px; }
 .order-data-table td strong, .order-data-table td small, .order-item-table td strong, .order-item-table td small { display: block; }
-.order-data-table td small, .order-item-table td small { margin-top: 4px; color: var(--color-muted); font-size: 10px; }
+.order-data-table td small, .order-item-table td small { margin-top: 4px; color: var(--color-muted); font-size: var(--font-size-sm); }
 .order-data-table td:last-child { min-width: 88px; }
 .order-pagination { margin-top: 14px; }
 .order-pagination > div { margin-left: auto; }
-.order-pagination .secondary-button { min-height: 32px; padding: 0 9px; font-size: 11px; }
-.order-list-state { display: flex; min-height: 170px; align-items: center; justify-content: center; gap: 10px; color: var(--color-muted); font-size: 13px; }
+.order-pagination .secondary-button { min-height: 32px; padding: 0 9px; font-size: var(--font-size-sm); }
+.order-list-state { display: flex; min-height: 170px; align-items: center; justify-content: center; gap: 10px; color: var(--color-muted); font-size: var(--font-size-base); }
 .loading-spinner { width: 17px; height: 17px; border: 2px solid #d8e5e9; border-top-color: var(--color-primary); border-radius: 50%; animation: order-spin .75s linear infinite; }
 .order-drawer-backdrop { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: flex-end; background: rgb(11 28 39 / 38%); }
 .order-drawer { display: flex; width: min(760px, 94vw); height: 100%; flex-direction: column; background: #fff; box-shadow: -12px 0 35px rgb(12 38 52 / 14%); animation: order-drawer-in .18s ease-out; }
 .order-drawer__header { display: flex; min-height: 76px; align-items: center; justify-content: space-between; padding: 10px 24px; border-bottom: 1px solid #e2e9ee; }
-.order-drawer__header h2 { margin: 2px 0 0; font-size: 17px; }
-.order-drawer__body { overflow: auto; flex: 1; padding: 21px 24px; color: #324a59; font-size: 12px; line-height: 1.65; }
+.order-drawer__header h2 { margin: 2px 0 0; font-size: var(--font-size-lg); }
+.order-drawer__body { overflow: auto; flex: 1; padding: 21px 24px; color: #324a59; font-size: var(--font-size-sm); line-height: 1.65; }
 .order-detail-status { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .order-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; padding-bottom: 16px; border-bottom: 1px solid #e2e9ee; }
 .order-detail-grid > div { display: grid; gap: 4px; min-width: 0; }
-.order-detail-grid span, .order-amount-summary small { color: var(--color-muted); font-size: 10px; }
+.order-detail-grid span, .order-amount-summary small { color: var(--color-muted); font-size: var(--font-size-sm); }
 .order-detail-grid strong { overflow-wrap: anywhere; color: #263e4d; font-weight: 550; }
-.order-drawer__body h3 { margin: 19px 0 9px; font-size: 14px; }
-.order-item-table th, .order-item-table td { min-width: 75px; padding: 9px; font-size: 11px; }
+.order-drawer__body h3 { margin: 19px 0 9px; font-size: var(--font-size-base); }
+.order-item-table th, .order-item-table td { min-width: 75px; padding: 9px; font-size: var(--font-size-sm); }
 .order-item-table td:first-child { min-width: 180px; }
 .order-amount-summary { margin-top: 14px; padding: 13px; background: #f4f7f9; }
-.order-amount-summary > strong { display: block; margin: 0 0 13px; color: #203c4d; font-size: 18px; text-align: right; }
+.order-amount-summary > strong { display: block; margin: 0 0 13px; color: #203c4d; font-size: var(--font-size-lg); text-align: right; }
 .order-amount-summary > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .order-amount-summary > div span { display: grid; gap: 3px; }
-.order-amount-summary > div strong { color: var(--color-primary); font-size: 17px; }
-.order-amount-summary p { margin: 9px 0 0; color: var(--color-warning); font-size: 11px; }
+.order-amount-summary > div strong { color: var(--color-primary); font-size: var(--font-size-lg); }
+.order-amount-summary p { margin: 9px 0 0; color: var(--color-warning); font-size: var(--font-size-sm); }
 .order-audit-section { margin-top: 18px; }
 .order-audit-section h3 { margin-top: 0 !important; }
 .order-audit-list { display: grid; gap: 11px; margin: 0; padding: 0; list-style: none; }
 .order-audit-list li { display: flex; align-items: flex-start; gap: 9px; }
 .order-audit-dot { width: 9px; height: 9px; flex: 0 0 auto; margin: 5px 0 0 1px; border: 2px solid #2c956c; border-radius: 50%; }
 .order-audit-list li div { display: grid; gap: 3px; }
-.order-audit-list strong { color: #3d5969; font-size: 11px; font-weight: 550; }
-.order-audit-list small, .order-source-list small { color: var(--color-muted); font-size: 10px; }
+.order-audit-list strong { color: #3d5969; font-size: var(--font-size-sm); font-weight: 550; }
+.order-audit-list small, .order-source-list small { color: var(--color-muted); font-size: var(--font-size-sm); }
 .order-source-list { display: grid; gap: 7px; margin-top: 15px; padding: 12px; border: 1px solid #e4ebef; border-radius: 5px; }
-.order-source-list > strong { font-size: 11px; }
+.order-source-list > strong { font-size: var(--font-size-sm); }
 .order-source-list > div { display: grid; grid-template-columns: minmax(100px, .6fr) minmax(0, 1.4fr); gap: 10px; }
-.order-source-list > div > span { overflow-wrap: anywhere; color: #476273; font-size: 10px; }
-.order-source-empty { margin: 11px 0 0; color: var(--color-muted); font-size: 10px; }
+.order-source-list > div > span { overflow-wrap: anywhere; color: #476273; font-size: var(--font-size-sm); }
+.order-source-empty { margin: 11px 0 0; color: var(--color-muted); font-size: var(--font-size-sm); }
 .order-drawer__footer { display: flex; justify-content: space-between; gap: 10px; padding: 14px 24px; border-top: 1px solid #e2e9ee; }
-.order-drawer__footer button { min-height: 37px; padding: 0 11px; font-size: 11px; }
+.order-drawer__footer button { min-height: 37px; padding: 0 11px; font-size: var(--font-size-sm); }
 @keyframes order-spin { to { transform: rotate(360deg); } }
 @keyframes order-drawer-in { from { transform: translateX(15px); opacity: .75; } to { transform: translateX(0); opacity: 1; } }
 @media (max-width: 1050px) { .order-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
