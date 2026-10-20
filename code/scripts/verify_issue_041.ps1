@@ -15,7 +15,7 @@ $reportPath = Join-Path $reportRoot $projectName
 $reportContainerPath = "/workspace/artifacts/performance/$projectName"
 $overrideFile = Join-Path ([System.IO.Path]::GetTempPath()) "compose-$projectName.yaml"
 $composeArgs = @('compose', '--project-name', $projectName, '--env-file', 'backend/.env', '--file', 'compose.yaml', '--file', $overrideFile)
-$names = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'WEB_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_ALLOW_SELF_APPROVAL', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'TRADEPILOT_ISSUE041_EVIDENCE', 'TRADEPILOT_ONLINE_MODEL', 'MCP_CONTEXT_SIGNING_KEY', 'RUNTIME_CONFIG_ENCRYPTION_KEY')
+$names = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'WEB_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_ALLOW_SELF_APPROVAL', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'TRADEPILOT_ISSUE041_EVIDENCE', 'TRADEPILOT_ONLINE_MODEL', 'MCP_CONTEXT_SIGNING_KEY', 'RUNTIME_CONFIG_ENCRYPTION_KEY', 'TRADEPILOT_ISSUE041_BROWSER_ORIGIN', 'TRADEPILOT_ISSUE041_BROWSER_PASSWORD')
 $oldEnvironment = @{}
 foreach ($name in $names) { $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 
@@ -90,41 +90,45 @@ function Assert-DatabaseBackup {
 }
 
 function Test-ResponsiveBrowser {
+    $browserRoot = Join-Path $codeRoot 'artifacts/performance/browsers'
+    $portableChrome = @(Get-ChildItem -LiteralPath $browserRoot -Directory -Filter 'chrome-*' -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter 'chrome.exe' -Recurse -ErrorAction SilentlyContinue } | Select-Object -ExpandProperty FullName)
+    $portableEdge = @(Get-ChildItem -LiteralPath $browserRoot -Directory -Filter 'edge-*' -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter 'msedge.exe' -Recurse -ErrorAction SilentlyContinue } | Select-Object -ExpandProperty FullName)
     $browserCandidates = @{
-        Chrome = @('C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe', "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe")
-        Edge = @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', 'C:\Program Files\Microsoft\Edge\Application\msedge.exe', "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe")
+        Chrome = @('C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe', "${env:LOCALAPPDATA}\Google\Chrome\Application\chrome.exe") + $portableChrome
+        Edge = @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', 'C:\Program Files\Microsoft\Edge\Application\msedge.exe', "${env:LOCALAPPDATA}\Microsoft\Edge\Application\msedge.exe") + $portableEdge
     }
     $browserResults = [ordered]@{}
+    $browserFailures = @()
     foreach ($browserName in @('Chrome', 'Edge')) {
-        $browserPath = $browserCandidates[$browserName] | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-        if (-not $browserPath) { $browserResults[$browserName] = @{ status = 'unavailable'; detail = '本机未安装可执行浏览器，未测。' }; continue }
-        $version = (Get-Item -LiteralPath $browserPath).VersionInfo.ProductVersion
-        $browserResult = [ordered]@{ status = 'installed'; version = $version; executable = $browserPath; viewports = @() }
-        if ($browserName -eq 'Edge') {
-            foreach ($size in @(@{ width = 1366; height = 768 }, @{ width = 1920; height = 1080 })) {
-                $screenshot = Join-Path $reportPath "edge-$($size.width)x$($size.height).png"
-                $profile = Join-Path ([System.IO.Path]::GetTempPath()) "$projectName-edge-$($size.width)"
-                $url = "http://localhost:$env:WEB_PORT/login?redirect=/"
-                $arguments = @('--headless', '--disable-gpu', '--no-first-run', "--user-data-dir=$profile", "--window-size=$($size.width),$($size.height)", "--screenshot=$screenshot", $url)
-                $edgeProcess = Start-Process -FilePath $browserPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
-                if (-not $edgeProcess.WaitForExit(30000)) { Stop-Process -Id $edgeProcess.Id -Force; throw "Edge $($size.width)x$($size.height) 页面截图超时。" }
-                Start-Sleep -Milliseconds 500
-                if (-not (Test-Path -LiteralPath $screenshot)) { throw "Edge $($size.width)x$($size.height) 未生成截图。" }
-                $bytes = [System.IO.File]::ReadAllBytes($screenshot)
-                $actualWidth = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 16))
-                $actualHeight = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($bytes, 20))
-                if ($actualWidth -ne $size.width -or $actualHeight -ne $size.height) { throw "Edge 截图尺寸错误：$actualWidth x $actualHeight。" }
-                $browserResult.viewports += @{ width = $actualWidth; height = $actualHeight; result = 'rendered'; screenshot = [System.IO.Path]::GetFileName($screenshot) }
-                $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-                $profilePath = [System.IO.Path]::GetFullPath($profile)
-                if ($profilePath.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction SilentlyContinue }
+        $paths = @($browserCandidates[$browserName] | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+        if (-not $paths.Count) { $browserResults[$browserName] = @{ status = 'unavailable'; detail = '未发现可执行浏览器，未测。' }; continue }
+        $versionResults = @()
+        foreach ($browserPath in $paths) {
+            $version = (Get-Item -LiteralPath $browserPath).VersionInfo.ProductVersion
+            $env:TRADEPILOT_ISSUE041_BROWSER_ORIGIN = "http://localhost:$env:WEB_PORT"
+            $env:TRADEPILOT_ISSUE041_BROWSER_PASSWORD = $env:DEMO_PASSWORD
+            $smokeScript = Join-Path $PSScriptRoot 'issue_041_browser_smoke.mjs'
+            try {
+                $browserOutput = & node $smokeScript --browser $browserPath --name $browserName --version $version --report-root $reportPath 2>&1
+                if ($LASTEXITCODE -ne 0) { throw ($browserOutput -join "`n") }
+                $versionResults += ($browserOutput -join '' | ConvertFrom-Json)
             }
-            $browserResult.status = 'tested_current_only'
-            $browserResult.previous_major = 'unavailable; 未安装独立旧版本'
+            catch {
+                $failure = "$browserName $version：$($_.Exception.Message)"
+                $browserFailures += $failure
+                $versionResults += @{ browser = $browserName; version = $version; result = 'failed'; error = $_.Exception.Message }
+                Write-Warning $failure
+            }
         }
-        $browserResults[$browserName] = $browserResult
+        $majorVersions = @($versionResults | ForEach-Object { [int](($_.version -split '\.')[0]) } | Sort-Object -Unique)
+        $allVersionsPassed = @($versionResults | Where-Object { $_.result -ne 'passed' }).Count -eq 0
+        $previousMajorAvailable = $majorVersions.Count -ge 2 -and ($majorVersions -contains ($majorVersions[-1] - 1))
+        $matrixStatus = if (-not $allVersionsPassed) { 'failed' } elseif ($previousMajorAvailable) { 'tested' } else { 'incomplete' }
+        if ($matrixStatus -eq 'incomplete') { Write-Warning "$browserName 当前/前一主版本矩阵未补齐；本次实际测试版本：$($versionResults.version -join ', ')。" }
+        $browserResults[$browserName] = @{ status = $matrixStatus; versions = $versionResults }
     }
-    [ordered]@{ checked_at_utc = [DateTimeOffset]::UtcNow.ToString('o'); url = "http://localhost:$env:WEB_PORT/login?redirect=/"; browser_matrix = $browserResults; note = '截图验证页面在目标分辨率可加载，不等同于全部业务主流程验收。' } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $reportPath 'browser-compatibility.json') -Encoding utf8
+    [ordered]@{ checked_at_utc = [DateTimeOffset]::UtcNow.ToString('o'); url = "http://localhost:$env:WEB_PORT/login?redirect=/orders"; flows = @('真实登录', '订单中心读取', '新任务工作台加载'); browser_matrix = $browserResults } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $reportPath 'browser-compatibility.json') -Encoding utf8
+    if ($browserFailures.Count) { throw "浏览器验收有失败项：$($browserFailures -join '；')" }
 }
 
 try {
