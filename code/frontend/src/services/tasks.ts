@@ -1,4 +1,5 @@
 import { useAuthStore } from '../stores/auth'
+import type { MissingField } from '../utils/fieldLabels'
 
 export type OrderType = 'SALES' | 'PURCHASE'
 export type TaskState =
@@ -92,7 +93,7 @@ export type TaskSnapshot = {
     interrupt_id: string
     draft_version: number | null
     content_hash: string | null
-    missing_fields: string[]
+    missing_fields: MissingField[]
     reason: string | null
   }
   latest_review: null | {

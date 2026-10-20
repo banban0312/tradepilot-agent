@@ -60,10 +60,10 @@ onMounted(() => search())
 <style scoped>
 .audit-log { display: grid; gap: 16px; }
 .audit-log__filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; gap: 12px; padding: 18px; }
-.audit-log__filters label { display: grid; gap: 6px; color: var(--color-muted); font-size: 11px; }
+.audit-log__filters label { display: grid; gap: 6px; color: var(--color-muted); font-size: var(--font-size-sm); }
 .audit-log__filters input { height: 39px; min-width: 0; border: 1px solid var(--color-border); border-radius: 5px; padding: 0 9px; }
 .audit-log__table-wrap { overflow: auto; padding: 14px; }
-.audit-log__table { width: 100%; border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+.audit-log__table { width: 100%; border-collapse: collapse; font-size: var(--font-size-sm); white-space: nowrap; }
 .audit-log__table th { background: #f3f7f9; color: var(--color-muted); text-align: left; }
 .audit-log__table th, .audit-log__table td { border-bottom: 1px solid var(--color-border); padding: 12px 10px; }
 .audit-log__table a, .audit-log__link { color: var(--color-primary); }
@@ -73,7 +73,7 @@ onMounted(() => search())
 .audit-log__more { display: flex; justify-content: center; padding-top: 12px; }
 .audit-log__details { padding: 18px; }
 .audit-log__details header { display: flex; justify-content: space-between; align-items: center; }
-.audit-log__details h2 { margin: 0; font-size: 16px; }
-.audit-log__details pre { overflow: auto; padding: 12px; border-radius: 6px; background: #f3f7f9; font-size: 11px; }
+.audit-log__details h2 { margin: 0; font-size: var(--font-size-md); }
+.audit-log__details pre { overflow: auto; padding: 12px; border-radius: 6px; background: #f3f7f9; font-size: var(--font-size-sm); }
 @media (max-width: 760px) { .audit-log__filters { grid-template-columns: 1fr 1fr; } }
 </style>
