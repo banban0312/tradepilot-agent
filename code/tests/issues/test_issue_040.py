@@ -14,8 +14,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
-
 from app.database import async_session_factory
 from app.drafts.service import save_candidate
 from app.drafts.types import CandidateOrder, CandidateOrderItem
@@ -34,6 +32,7 @@ from app.models import (
     TaskWait,
 )
 from app.orders.commit import commit_approved_order
+from sqlalchemy import func, select
 
 _NORTH_OWNER = UUID("00000000-0000-4000-8000-000000000100")
 _NORTH_APPROVER = UUID("00000000-0000-4000-8000-000000000102")
@@ -159,9 +158,7 @@ async def test_batch_children_competing_for_one_contract_cannot_overoccupy_quota
     """真实导入批次的两个子任务并发提交同一合同，只允许一笔占额成功。"""
     issue016 = runpy.run_path(str(Path(__file__).with_name("test_issue_016.py")))
     issue029 = runpy.run_path(str(Path(__file__).with_name("test_issue_029.py")))
-    contract_id, _ = await issue016["_new_contract"](
-        total_amount=Decimal("250000.00")
-    )
+    contract_id, _ = await issue016["_new_contract"](total_amount=Decimal("250000.00"))
     async with async_session_factory() as session:
         contract = await session.get(Contract, contract_id)
         assert contract is not None
@@ -420,3 +417,158 @@ async def test_postgres_wait_recovery_survives_ten_worker_process_restarts() -> 
         completed_cycles += 1
 
     assert completed_cycles == 10
+
+
+@pytest.mark.skipif(
+    os.getenv("TRADEPILOT_TEST_MODE") != "1"
+    or os.getenv("TRADEPILOT_SERVICE_RESTART_WAIT_KIND") not in {"INPUT", "APPROVAL"},
+    reason="需由 verify_issue_040.ps1 在隔离 PostgreSQL Compose 环境执行",
+)
+@pytest.mark.asyncio
+async def test_prepare_wait_state_for_real_worker_restart() -> None:
+    """为 Compose Worker 服务重启验收创建真实 PostgreSQL 图检查点。"""
+    from datetime import UTC, datetime
+
+    from app.agent.workflow import (
+        GRAPH_VERSION,
+        build_task_graph,
+        task_graph_config,
+        wait_details,
+    )
+    from app.database import engine
+    from app.tasks.checkpointer import EpochFencedPostgresSaver
+    from app.tasks.service import (
+        TaskExecutionLease,
+        create_task,
+        enqueue_command,
+        try_claim_job,
+    )
+    from app.tasks.waits import project_wait
+
+    wait_kind = os.getenv("TRADEPILOT_SERVICE_RESTART_WAIT_KIND")
+    evidence_path = os.getenv("TRADEPILOT_SERVICE_RESTART_STATE_PATH")
+    assert wait_kind in {"INPUT", "APPROVAL"}
+    assert evidence_path
+
+    issue013 = runpy.run_path(str(Path(__file__).with_name("test_issue_013.py")))
+    owner_id = UUID("00000000-0000-4000-8000-000000000100")
+    department_id = UUID("00000000-0000-4000-8000-000000000001")
+    async with async_session_factory() as session, session.begin():
+        task = await create_task(
+            session,
+            owner_id=owner_id,
+            department_id=department_id,
+            task_type="SALES",
+            task_id=uuid4(),
+        )
+        start = await enqueue_command(
+            session,
+            task_id=task.id,
+            actor_id=owner_id,
+            kind="START",
+            payload={
+                "text": (
+                    "螺纹钢 200 吨"
+                    if wait_kind == "INPUT"
+                    else "螺纹钢规格 HRB400 200 吨"
+                )
+            },
+            request_id=f"issue040-service-restart-{wait_kind}-{uuid4()}",
+        )
+        task_id, job_id, command_id = task.id, start.job_id, start.command_id
+
+    worker_id = f"issue040-service-restart-{uuid4()}"
+    async with async_session_factory() as session, session.begin():
+        job = await try_claim_job(
+            session, worker_id=worker_id, supported_kinds=frozenset({"RUN_TASK"})
+        )
+        assert job is not None and job.id == job_id
+
+    checkpoint_schema = f"tp_issue040_restart_{uuid4().hex}"
+    connection = await engine.connect()
+    lease = await TaskExecutionLease.acquire(
+        connection, task_id=task_id, job_id=job_id, worker_id=worker_id
+    )
+    try:
+        saver = EpochFencedPostgresSaver(lease, checkpoint_schema=checkpoint_schema)
+        await saver.setup()
+        graph = build_task_graph(
+            issue013["FixedWorkflowServices"](), checkpointer=saver
+        )
+        result = await graph.ainvoke(
+            {
+                "task_id": str(task_id),
+                "graph_version": GRAPH_VERSION,
+                "command_id": str(command_id),
+                "command_kind": "START",
+                "input_text": (
+                    "螺纹钢 200 吨"
+                    if wait_kind == "INPUT"
+                    else "螺纹钢规格 HRB400 200 吨"
+                ),
+                "input_at": datetime.now(UTC).isoformat(),
+            },
+            config=task_graph_config(task_id),
+        )
+        details = wait_details(await graph.aget_state(task_graph_config(task_id)))
+        assert details is not None
+        expected_state = "WAITING_INPUT" if wait_kind == "INPUT" else "WAITING_APPROVAL"
+        assert result["projection_state"] == expected_state
+        wait = await project_wait(lease, details)
+        assert wait.kind == wait_kind and wait.active
+        await lease.finish()
+    finally:
+        try:
+            await lease.release()
+        finally:
+            await connection.close()
+
+    Path(evidence_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(evidence_path).write_text(
+        json.dumps(
+            {
+                "task_id": str(task_id),
+                "wait_kind": wait_kind,
+                "state": expected_state,
+                "checkpoint_ref": details["checkpoint_id"],
+                "interrupt_id": details["interrupt_id"],
+                "graph_version": GRAPH_VERSION,
+                "draft_version": details["draft_version"],
+                "restart_count": 0,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.skipif(
+    os.getenv("TRADEPILOT_TEST_MODE") != "1"
+    or os.getenv("TRADEPILOT_SERVICE_RESTART_COUNT") != "10",
+    reason="需由 verify_issue_040.ps1 在隔离 PostgreSQL Compose 环境执行",
+)
+@pytest.mark.asyncio
+async def test_wait_state_and_checkpoint_survive_real_worker_service_restarts() -> None:
+    """核对 Compose Worker 重启后数据库等待投影及图版本仍一致。"""
+    evidence_path = os.getenv("TRADEPILOT_SERVICE_RESTART_STATE_PATH")
+    assert evidence_path
+    evidence = json.loads(Path(evidence_path).read_text(encoding="utf-8"))
+    expected_restarts = int(os.getenv("TRADEPILOT_SERVICE_RESTART_COUNT", "0"))
+    assert expected_restarts == 10
+    assert evidence["restart_count"] == expected_restarts
+
+    async with async_session_factory() as session:
+        task = await session.get(AgentTask, UUID(evidence["task_id"]))
+        wait = await session.scalar(
+            select(TaskWait).where(
+                TaskWait.task_id == UUID(evidence["task_id"]), TaskWait.active.is_(True)
+            )
+        )
+    assert task is not None and wait is not None
+    assert task.state == evidence["state"]
+    assert task.graph_version == evidence["graph_version"]
+    assert task.checkpoint_ref == evidence["checkpoint_ref"]
+    assert wait.kind == evidence["wait_kind"]
+    assert wait.checkpoint_ref == evidence["checkpoint_ref"]
+    assert wait.interrupt_id == evidence["interrupt_id"]
+    assert wait.draft_version == evidence["draft_version"]

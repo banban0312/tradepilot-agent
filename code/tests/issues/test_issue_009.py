@@ -10,11 +10,6 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from mcp import Client
-from mcp.client.streamable_http import streamable_http_client
-from pydantic import SecretStr, ValidationError
-from sqlalchemy import delete, func, select
-
 from app.auth.context import BUSINESS_OPERATOR, AuthContext
 from app.config import settings
 from app.database import async_session_factory
@@ -48,6 +43,10 @@ from app.models import (
     UserDepartmentScope,
     UserRole,
 )
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from pydantic import SecretStr, ValidationError
+from sqlalchemy import delete, func, select
 
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:8001/mcp")
 

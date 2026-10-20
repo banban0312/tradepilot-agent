@@ -18,7 +18,7 @@ if (-not (Test-Path -LiteralPath $envFile)) {
     throw '未找到 code/backend/.env；请先按 backend/.env.example 配置本机验收环境。'
 }
 
-$environmentNames = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_ALLOW_SELF_APPROVAL', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'MCP_CONTEXT_SIGNING_KEY', 'RUNTIME_CONFIG_ENCRYPTION_KEY', 'EVAL_API_URL', 'EVAL_DATABASE_HOST', 'EVAL_PROJECT_NAME', 'TRADEPILOT_EVAL_SANDBOX')
+$environmentNames = @('POSTGRES_PORT', 'API_PORT', 'MCP_HOST_PORT', 'APP_ORIGIN', 'DEMO_MODE', 'DEMO_ALLOW_SELF_APPROVAL', 'DEMO_PASSWORD', 'SESSION_COOKIE_SECURE', 'TRADEPILOT_TEST_MODE', 'TRADEPILOT_MCP_INTEGRATION', 'MCP_CONTEXT_SIGNING_KEY', 'RUNTIME_CONFIG_ENCRYPTION_KEY', 'EVAL_API_URL', 'EVAL_DATABASE_HOST', 'EVAL_PROJECT_NAME', 'TRADEPILOT_EVAL_SANDBOX', 'TRADEPILOT_SERVICE_RESTART_WAIT_KIND', 'TRADEPILOT_SERVICE_RESTART_STATE_PATH', 'TRADEPILOT_SERVICE_RESTART_COUNT')
 $oldEnvironment = @{}
 foreach ($name in $environmentNames) {
     $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -64,6 +64,8 @@ try {
     $env:EVAL_DATABASE_HOST = 'db'
     $env:EVAL_PROJECT_NAME = $projectName
     $env:TRADEPILOT_EVAL_SANDBOX = '1'
+    $env:TRADEPILOT_SERVICE_RESTART_STATE_PATH = "$reportDirectory/service-restarts/state.json"
+    $restartEvidencePath = Join-Path $reportPath 'service-restarts/state.json'
     $key = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($key)
     $env:MCP_CONTEXT_SIGNING_KEY = [Convert]::ToBase64String($key)
@@ -74,7 +76,8 @@ try {
         'services:',
         "  api:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
         "  mcp:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
-        "  verify:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''`n      EVAL_API_URL: $env:EVAL_API_URL`n      EVAL_DATABASE_HOST: $env:EVAL_DATABASE_HOST`n      EVAL_PROJECT_NAME: $env:EVAL_PROJECT_NAME`n      TRADEPILOT_EVAL_SANDBOX: '1'`n      PYTHONPATH: /workspace:/app`n      MCP_CONTEXT_SIGNING_KEY: $env:MCP_CONTEXT_SIGNING_KEY`n      RUNTIME_CONFIG_ENCRYPTION_KEY: $env:RUNTIME_CONFIG_ENCRYPTION_KEY`n    volumes:`n      - ./artifacts/evals:/workspace/artifacts/evals"
+        "  worker:`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''",
+        "  verify:`n    image: $imageName`n    environment:`n      MODEL_PROVIDER: ''`n      MODEL_NAME: ''`n      MODEL_API_KEY: ''`n      MODEL_BASE_URL: ''`n      OCR_PROVIDER: local_tesseract`n      OCR_API_KEY: ''`n      EVAL_API_URL: $env:EVAL_API_URL`n      EVAL_DATABASE_HOST: $env:EVAL_DATABASE_HOST`n      EVAL_PROJECT_NAME: $env:EVAL_PROJECT_NAME`n      TRADEPILOT_EVAL_SANDBOX: '1'`n      TRADEPILOT_SERVICE_RESTART_WAIT_KIND: `${TRADEPILOT_SERVICE_RESTART_WAIT_KIND:-}`n      TRADEPILOT_SERVICE_RESTART_STATE_PATH: $env:TRADEPILOT_SERVICE_RESTART_STATE_PATH`n      TRADEPILOT_SERVICE_RESTART_COUNT: `${TRADEPILOT_SERVICE_RESTART_COUNT:-}`n      PYTHONPATH: /workspace:/app`n      MCP_CONTEXT_SIGNING_KEY: $env:MCP_CONTEXT_SIGNING_KEY`n      RUNTIME_CONFIG_ENCRYPTION_KEY: $env:RUNTIME_CONFIG_ENCRYPTION_KEY`n    volumes:`n      - ./artifacts/evals:/workspace/artifacts/evals"
     ) -join "`n" | Set-Content -LiteralPath $overrideFile -Encoding utf8
 
     Push-Location $codeRoot
@@ -135,6 +138,32 @@ try {
                 Reset-VerificationDatabase
             }
             Invoke-Compose @('run', '--rm', '--no-deps', 'verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', $isolatedFile)
+        }
+
+        if ($regressionFiles -contains '/workspace/tests/issues/test_issue_040.py') {
+            # 重启验收使用空数据库和真实 Compose Worker 服务；两个等待态分别重启十次。
+            Reset-VerificationDatabase
+            foreach ($waitKind in @('INPUT', 'APPROVAL')) {
+                $env:TRADEPILOT_SERVICE_RESTART_WAIT_KIND = $waitKind
+                $env:TRADEPILOT_SERVICE_RESTART_COUNT = '10'
+                $stateFileName = "state-$($waitKind.ToLowerInvariant()).json"
+                $env:TRADEPILOT_SERVICE_RESTART_STATE_PATH = "$reportDirectory/service-restarts/$stateFileName"
+                $restartEvidencePath = Join-Path (Join-Path $reportPath 'service-restarts') $stateFileName
+                $restartTestEnvironment = @('--env', "TRADEPILOT_SERVICE_RESTART_WAIT_KIND=$waitKind", '--env', "TRADEPILOT_SERVICE_RESTART_STATE_PATH=$env:TRADEPILOT_SERVICE_RESTART_STATE_PATH", '--env', 'TRADEPILOT_SERVICE_RESTART_COUNT=10')
+                Invoke-Compose (@('run', '--rm', '--no-deps') + $restartTestEnvironment + @('verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', '/workspace/tests/issues/test_issue_040.py::test_prepare_wait_state_for_real_worker_restart'))
+                Invoke-Compose @('up', '--detach', '--wait', 'worker')
+                for ($restart = 1; $restart -le 10; $restart++) {
+                    Write-Host "Compose Worker 服务重启：$waitKind $restart/10"
+                    Invoke-Compose @('restart', '--timeout', '20', 'worker')
+                    Invoke-Compose @('exec', '--no-TTY', 'worker', 'uv', 'run', '--frozen', 'python', '-m', 'app.worker.healthcheck')
+                }
+                $restartEvidence = Get-Content -LiteralPath $restartEvidencePath -Raw | ConvertFrom-Json
+                $restartEvidence.restart_count = $restart - 1
+                $restartEvidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $restartEvidencePath -Encoding utf8
+                Invoke-Compose (@('run', '--rm', '--no-deps') + $restartTestEnvironment + @('verify', 'uv', 'run', '--frozen', 'python', '-m', 'pytest', '-q', '-x', '--tb=short', '/workspace/tests/issues/test_issue_040.py::test_wait_state_and_checkpoint_survive_real_worker_service_restarts'))
+                Write-Host "等待态重启证据：$restartEvidencePath"
+                Invoke-Compose @('stop', 'worker')
+            }
         }
     }
     catch {
