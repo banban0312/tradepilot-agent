@@ -6,6 +6,8 @@
 |---|---|
 | [PRD](./PRD.md) | 业务目标、功能需求、权限、业务规则与验收标准 |
 | [技术 Spec](./SPEC.md) | 系统架构、工作流、工具契约、数据模型、API 与实现任务 |
+| [本地运行、演示与交付指南](./DELIVERY-GUIDE.md) | Compose 快速启动、账号、演示路线、评测、备份恢复、清理与限制 |
+| [验收证据索引](./ACCEPTANCE-EVIDENCE.md) | 六项核心能力、FR/AC/NFR、25 个原型画板与测试入口映射 |
 | [原型说明](./design/README.md) | 25 个功能及状态画板、视觉规范与阅读路径 |
 | [验收覆盖表](./design/ACCEPTANCE-COVERAGE.md) | 28 项 P0/P1 功能、27 条 AC 与画板逐项对应 |
 | [本地开发环境](./development/LOCAL-ENVIRONMENT.md) | uv、Node.js、Compose 启动及 issue 验证命令 |
